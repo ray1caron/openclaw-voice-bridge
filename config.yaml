@@ -1,0 +1,47 @@
+# Voice Bridge v3 Configuration
+# Copy this file to ~/.voice-bridge/config.yaml
+
+# OpenClaw Connection
+openclaw:
+  host: "localhost"
+  port: 18789
+  secure: false
+  api_key: ""  # Set this if OpenClaw requires authentication
+  timeout: 30.0
+
+# Audio Settings
+audio:
+  input_device: "default"    # Use "default" or specific device name
+  output_device: "default"   # Use "default" or specific device name
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 1024
+
+# Speech-to-Text (Whisper)
+stt:
+  model: "base"     # Options: tiny, base, small, medium, large-v3
+  language: null     # null = auto-detect
+  device: "cuda"     # Options: cpu, cuda, auto
+  compute_type: "int8"
+
+# Text-to-Speech (Piper)
+tts:
+  voice: "en_US-lessac-medium"  # Default voice
+  speed: 1.0
+  volume: 1.0
+
+# Bridge Behavior
+bridge:
+  wake_word: "hey hal"
+  response_timeout: 10.0
+  max_session_duration: 300.0
+  log_level: "INFO"    # Options: DEBUG, INFO, WARNING, ERROR
+  hot_reload: true
+
+# Session Persistence
+persistence:
+  enabled: true
+  db_path: null        # null = use default path
+  ttl_minutes: 30
+  max_history: 10
+  cleanup_interval: 60
