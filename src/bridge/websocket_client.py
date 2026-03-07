@@ -17,6 +17,8 @@ import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 
 from bridge.config import get_config, OpenClawConfig
+from bridge.errorcapture import ErrorCapture
+from bridge.bug_tracker import BugSeverity
 
 logger = structlog.get_logger()
 
@@ -199,11 +201,9 @@ class OpenClawWebSocketClient:
         # Use provided config or load from system
         self.config = config or get_config().openclaw
         
-        # Build URL from config — path is configurable so the endpoint can
-        # be changed without touching code (ws_path in config.yaml).
+        # Build URL from config
         protocol = "wss" if self.config.secure else "ws"
-        ws_path = getattr(self.config, "ws_path", "/api/voice")
-        self.url = f"{protocol}://{self.config.host}:{self.config.port}{ws_path}"
+        self.url = f"{protocol}://{self.config.host}:{self.config.port}/api/voice"
         
         # Reconnection settings
         self.max_retries = 5
@@ -221,11 +221,7 @@ class OpenClawWebSocketClient:
         # Session persistence (Issue #20)
         config_obj = get_config()
         self.enable_persistence = config_obj.persistence.enabled
-
-        # Turn counter for persistence. Initialized here so it is always
-        # defined regardless of whether a session is created in _do_connect.
-        self._turn_index: int = 0
-
+        
         # Session recovery (Issue #23)
         self.previous_session_uuid: Optional[str] = None
         self.should_restore_session: bool = False
@@ -244,7 +240,14 @@ class OpenClawWebSocketClient:
         
         # Connection lock to prevent race conditions
         self._connection_lock = asyncio.Lock()
-        
+
+        # Error capture for automatic bug tracking
+        self.error_capture = ErrorCapture(
+            component="websocket",
+            severity=BugSeverity.HIGH,
+            reraise=False,
+        )
+
         logger.info(
             "WebSocket client initialized",
             url=self.url,
@@ -308,17 +311,12 @@ class OpenClawWebSocketClient:
                     max_retries=self.max_retries,
                 )
                 
-                # close_timeout must be shorter than the asyncio.wait_for
-                # timeout — if they are equal the close handshake can fire
-                # after wait_for already raised TimeoutError, causing a
-                # cascading / double-timeout condition.
-                close_timeout = min(5.0, self.config.timeout / 4)
                 self.websocket = await asyncio.wait_for(
                     websockets.connect(
                         self.url,
                         ping_interval=20,
                         ping_timeout=10,
-                        close_timeout=close_timeout,
+                        close_timeout=self.config.timeout,
                     ),
                     timeout=self.config.timeout,
                 )
@@ -453,6 +451,7 @@ class OpenClawWebSocketClient:
                 
             except Exception as e:
                 logger.error("Unexpected error during connection", error=str(e))
+                self.error_capture.run(lambda: (_ for _ in ()).throw(e))
                 self._connection_attempts += 1
                 self._set_state(ConnectionState.ERROR)
                 break
@@ -728,6 +727,7 @@ class OpenClawWebSocketClient:
             raise
         except Exception as e:
             logger.error("Error in receive loop", error=str(e))
+            self.error_capture.run(lambda: (_ for _ in ()).throw(e))
             self._set_state(ConnectionState.ERROR)
     
     async def _ping_loop(self) -> None:

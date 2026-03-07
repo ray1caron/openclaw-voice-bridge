@@ -15,7 +15,7 @@ Key Features:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Set, Any, Callable
 from enum import Enum
 
@@ -242,10 +242,14 @@ class KnownIssues:
         ...     print("Issue previously detected in this session")
     """
     
+    # Minimum minutes between repeated reports of the same issue key
+    # in the same session before a new bug DB entry is created.
+    DEDUP_WINDOW_MINUTES: int = 5
+
     def __init__(self, bug_tracker: Optional[BugTracker] = None) -> None:
         """
         Initialize known issues manager.
-        
+
         Args:
             bug_tracker: Optional BugTracker instance (singleton used if not provided)
         """
@@ -268,40 +272,42 @@ class KnownIssues:
         """
         return KNOWN_ISSUES.copy()
     
+    def _is_recently_detected(self, issue_key: str, session_id: str) -> bool:
+        """Return True if this issue was detected in this session within the dedup window."""
+        session_detections = self._detections.get(session_id, [])
+        cutoff = datetime.now() - timedelta(minutes=self.DEDUP_WINDOW_MINUTES)
+        for d in reversed(session_detections):
+            if d.issue_key == issue_key:
+                try:
+                    if datetime.fromisoformat(d.timestamp) > cutoff:
+                        return True
+                except ValueError:
+                    pass
+                break  # detections are ordered; no need to scan further back
+        return False
+
     def detect_and_capture(
         self,
         issue_key: str,
         context: Dict[str, Any],
         session_id: str,
         user_context: Optional[str] = None,
-        auto_create_github: bool = False,
     ) -> Optional[int]:
         """
         Detect a known issue and capture it as a bug report.
-        
-        Validates the issue key, creates a bug report with full context,
-        and records the detection for this session.
-        
+
+        Includes a time-windowed deduplication guard: if the same issue was
+        already reported in this session within DEDUP_WINDOW_MINUTES, the
+        existing bug ID is returned and no new DB row is created.
+
         Args:
             issue_key: Key identifying the known issue (must exist in KNOWN_ISSUES)
             context: Additional context about the detection (state, values, etc.)
             session_id: Session identifier where detection occurred
             user_context: Optional human-readable context description
-            auto_create_github: Whether to automatically create a GitHub issue
-            
+
         Returns:
             Bug report ID if successfully captured, None if issue_key is invalid
-            
-        Raises:
-            ValueError: If issue_key does not exist in KNOWN_ISSUES
-            
-        Example:
-            >>> bug_id = issues.detect_and_capture(
-            ...     issue_key="wake_word_zero_scores",
-            ...     context={"scores": [0.0, 0.0, 0.0], "frame_count": 100},
-            ...     session_id="sess_123",
-            ...     user_context="Detected during morning startup",
-            ... )
         """
         # Validate issue key
         if issue_key not in KNOWN_ISSUES:
@@ -310,11 +316,23 @@ class KnownIssues:
                 issue_key=issue_key,
                 valid_keys=list(KNOWN_ISSUES.keys()),
             )
-            # Still capture it but mark as unknown
             return self._capture_unknown_issue(issue_key, context, session_id)
-        
+
+        # Time-windowed dedup: skip if same issue was captured recently
+        if self._is_recently_detected(issue_key, session_id or ""):
+            existing = self._detections.get(session_id or "", [])
+            for d in reversed(existing):
+                if d.issue_key == issue_key and d.bug_id is not None:
+                    logger.debug(
+                        "known_issue_deduplicated",
+                        issue_key=issue_key,
+                        existing_bug_id=d.bug_id,
+                    )
+                    return d.bug_id
+            return None
+
         issue_info = KNOWN_ISSUES[issue_key]
-        
+
         # Create detection record
         detection = IssueDetection(
             issue_key=issue_key,
@@ -322,7 +340,7 @@ class KnownIssues:
             timestamp=datetime.now().isoformat(),
             context=context,
         )
-        
+
         # Create bug report
         try:
             bug_id = self.bug_tracker.capture_error(
@@ -333,12 +351,12 @@ class KnownIssues:
                 user_context=user_context or self._format_user_context(issue_info, context),
                 session_id=session_id,
             )
-            
+
             detection.bug_id = bug_id
-            
+
             # Track detection
             self._record_detection(detection)
-            
+
             logger.info(
                 "known_issue_captured",
                 issue_key=issue_key,
@@ -347,9 +365,9 @@ class KnownIssues:
                 bug_id=bug_id,
                 session_id=session_id,
             )
-            
+
             return bug_id
-            
+
         except Exception as e:
             logger.error(
                 "failed_to_capture_known_issue",

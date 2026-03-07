@@ -152,7 +152,7 @@ class VoiceOrchestrator:
         self._wake_ack_pending = False
         self._wake_ack_timer: Optional[threading.Timer] = None
         self._wake_ack_lock = threading.Lock()
-        # Set when stop() is called so in-flight timer callbacks can bail out early
+        # Set when stop() is called so in-flight timer callbacks can bail early
         self._shutdown_event = threading.Event()
 
         # Event loop reference for safe async dispatch from audio threads.
@@ -237,25 +237,25 @@ class VoiceOrchestrator:
             if self._running:
                 logger.warning("orchestrator_already_running")
                 return False
-            
+
             logger.info("starting_orchestrator")
 
             # Clear shutdown flag so timer callbacks work after a restart
             self._shutdown_event.clear()
 
-            # Initialize components
-            if not self.stt_engine.initialize():
-                logger.warning("stt_initialization_failed")
-            
-            if not self.tts_engine.initialize():
-                logger.warning("tts_initialization_failed")
-            
             # Capture the running event loop so audio-thread callbacks can
             # safely schedule coroutines via run_coroutine_threadsafe.
             try:
                 self._event_loop = asyncio.get_running_loop()
             except RuntimeError:
                 self._event_loop = None
+
+            # Initialize components
+            if not self.stt_engine.initialize():
+                logger.warning("stt_initialization_failed")
+
+            if not self.tts_engine.initialize():
+                logger.warning("tts_initialization_failed")
 
             # Start audio pipeline
             if not self.audio_pipeline.start():
@@ -269,18 +269,18 @@ class VoiceOrchestrator:
             # Update state
             self._running = True
             self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
-            
+
             logger.info("orchestrator_started")
             return True
-    
+
     def stop(self):
         """Stop the voice orchestrator."""
         logger.info("stopping_orchestrator")
-        
+
         with self._running_lock:
             if not self._running:
                 return
-            
+
             self._running = False
 
             # Signal shutdown to any in-flight timer callbacks before
@@ -294,18 +294,18 @@ class VoiceOrchestrator:
                 if self._wake_ack_timer:
                     self._wake_ack_timer.cancel()
                     self._wake_ack_timer = None
-            
+
             # Stop components
             self.wake_word_detector.stop()
             self.audio_pipeline.stop()
-            
+
             # WebSocket cleanup - handled by __del__ or context manager
             # Don't try to await from sync context; coroutine warning is harmless
             self.websocket = None
-            
+
             self._set_state(OrchestratorState.IDLE)
             logger.info("orchestrator_stopped")
-    
+
     def is_running(self) -> bool:
         """Check if orchestrator is running."""
         with self._running_lock:
@@ -316,10 +316,9 @@ class VoiceOrchestrator:
         Schedule a coroutine on the captured event loop from any thread.
 
         Audio pipeline callbacks run in background threads, so we cannot
-        use asyncio.run() (which would try to create a second loop) or
-        asyncio.create_task() (which requires the calling code to already
-        be in an async context).  run_coroutine_threadsafe() is the correct
-        bridge between threads and a running event loop.
+        use asyncio.run() (which creates a second loop) or asyncio.create_task()
+        (which requires an async context). run_coroutine_threadsafe() is the
+        correct bridge between threads and a running event loop.
         """
         if self._event_loop and self._event_loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, self._event_loop)
@@ -330,7 +329,7 @@ class VoiceOrchestrator:
             except Exception as e:
                 logger.error("dispatch_coroutine_error", error=str(e))
                 self._set_state(OrchestratorState.LISTENING)
-
+    
     # =========================================================================
     # Audio frame callback
     # =========================================================================
@@ -459,7 +458,7 @@ class VoiceOrchestrator:
         Handle timeout waiting for wake word ack response from OpenClaw.
 
         Falls back to local TTS if enabled, otherwise proceeds to listening state.
-        Guard against being called after stop() — the timer may fire in a
+        Guards against being called after stop() — the timer may fire in a
         thread that is already racing with shutdown.
 
         Args:
@@ -473,51 +472,51 @@ class VoiceOrchestrator:
                 # Already handled
                 return
             self._wake_ack_pending = False
-        
+
         logger.info("wake_ack_timeout_using_fallback")
-        
+
         # Cancel timer if still running
         if self._wake_ack_timer:
             self._wake_ack_timer.cancel()
             self._wake_ack_timer = None
-        
+
         if ack_config.fallback_to_local_tts:
-            # Use local TTS for acknowledgement
             self._speak_acknowledgement(ack_config.response_phrase)
         else:
-            # Skip acknowledgement, go to listening
             self._set_state(OrchestratorState.LISTENING)
-    
+
     def _speak_acknowledgement(self, phrase: str):
         """
         Speak the acknowledgement phrase via TTS.
-        
+
+        Dispatches TTS synthesis to a thread pool so the event loop is never
+        blocked by Piper inference (50-200ms).
+
         Args:
             phrase: The phrase to speak
         """
         logger.info("speaking_acknowledgement", phrase=phrase)
-        
-        try:
-            # Generate TTS audio
-            audio_data = self.tts_engine.speak(phrase)
-            
-            if len(audio_data) > 0:
-                # Play the acknowledgement
-                self.audio_pipeline.play_audio(audio_data, sample_rate=22050)
-                self._set_state(OrchestratorState.SPEAKING)
-                
-                # After speaking, transition to listening
-                # The pipeline state callback will handle this
-                threading.Timer(
-                    0.5,  # Short delay to ensure audio starts
-                    lambda: self._set_state(OrchestratorState.LISTENING)
-                ).start()
-            else:
-                logger.warning("empty_acknowledgement_audio")
+
+        async def _async_speak():
+            try:
+                # Run blocking TTS synthesis off the event loop
+                audio_data = await asyncio.to_thread(self.tts_engine.speak, phrase)
+                if len(audio_data) > 0:
+                    self.audio_pipeline.play_audio(audio_data, sample_rate=22050)
+                    self._set_state(OrchestratorState.SPEAKING)
+                    # Transition to listening after audio starts (pipeline
+                    # state callback will also handle this on playback end)
+                    await asyncio.sleep(0.5)
+                    if self._state == OrchestratorState.SPEAKING:
+                        self._set_state(OrchestratorState.LISTENING)
+                else:
+                    logger.warning("empty_acknowledgement_audio")
+                    self._set_state(OrchestratorState.LISTENING)
+            except Exception as e:
+                logger.error("speak_acknowledgement_error", error=str(e))
                 self._set_state(OrchestratorState.LISTENING)
-        except Exception as e:
-            logger.error("speak_acknowledgement_error", error=str(e))
-            self._set_state(OrchestratorState.LISTENING)
+
+        self._dispatch_coroutine(_async_speak())
     
     def _on_wake_ack_response(self, response_text: str):
         """
@@ -650,75 +649,64 @@ class VoiceOrchestrator:
     def _on_websocket_message(self, message: dict):
         """
         Handle incoming WebSocket messages.
-
-        Validates structure before processing to prevent crashes from
-        malformed payloads sent by the OpenClaw gateway.
-
+        
+        Processes OpenClaw responses and triggers TTS.
+        
         Args:
             message: Incoming message dict
         """
         if not self._running:
             return
-
-        # Basic structural validation
-        if not isinstance(message, dict):
-            logger.warning("websocket_message_not_dict", received_type=type(message).__name__)
-            return
-
-        msg_type = message.get("type")
-        if not isinstance(msg_type, str) or not msg_type:
-            logger.warning("websocket_message_missing_type", message_keys=list(message.keys()))
-            return
-
+        
+        msg_type = message.get("type", "")
+        
         if msg_type == "voice_response":
-            response_text = message.get("text", "")
-            if not isinstance(response_text, str):
-                logger.warning("voice_response_text_not_string", received_type=type(response_text).__name__)
-                return
-            response_text = response_text.strip()
-            if not response_text:
-                logger.warning("voice_response_empty_text")
-                return
-
             # Check if this is a wake word ack response
             with self._wake_ack_lock:
                 if self._wake_ack_pending and self._state == OrchestratorState.WAKE_WORD_ACK:
-                    self._on_wake_ack_response(response_text)
-                    return
-
-            self._on_response_received(response_text)
-
+                    # This is the wake word acknowledgement response
+                    response_text = message.get("text", "")
+                    if response_text:
+                        self._on_wake_ack_response(response_text)
+                        return
+            
+            # Process voice response
+            response_text = message.get("text", "")
+            if response_text:
+                self._on_response_received(response_text)
+        
         elif msg_type == "control":
+            # Handle control messages
             action = message.get("action", "")
-            if not isinstance(action, str):
-                logger.warning("control_action_not_string", received_type=type(action).__name__)
-                return
             if action == "interrupt":
                 self._handle_barge_in()
-            else:
-                logger.debug("unhandled_control_action", action=action)
     
     def _on_response_received(self, text: str):
         """
         Handle response from OpenClaw.
-        
-        Triggers TTS to speak the response.
-        
+
+        Dispatches TTS synthesis to a thread pool so the event loop is never
+        blocked by Piper inference (50-200ms).
+
         Args:
             text: Response text to speak
         """
         logger.info("response_received", text=text)
-        
-        # Generate speech
-        audio_data = self.tts_engine.speak(text)
-        
-        # Play audio with TTS sample rate (22050 Hz for Piper)
-        if len(audio_data) > 0:
-            self.audio_pipeline.play_audio(audio_data, sample_rate=22050)
-            self._set_state(OrchestratorState.SPEAKING)
-        else:
-            # No audio - go back to listening
-            self._set_state(OrchestratorState.LISTENING)
+        self._stats.completed_responses += 1
+
+        async def _async_respond():
+            try:
+                audio_data = await asyncio.to_thread(self.tts_engine.speak, text)
+                if len(audio_data) > 0:
+                    self.audio_pipeline.play_audio(audio_data, sample_rate=22050)
+                    self._set_state(OrchestratorState.SPEAKING)
+                else:
+                    self._set_state(OrchestratorState.LISTENING)
+            except Exception as e:
+                logger.error("response_tts_error", error=str(e))
+                self._set_state(OrchestratorState.LISTENING)
+
+        self._dispatch_coroutine(_async_respond())
     
     def _on_websocket_connect(self):
         """Handle WebSocket connection."""
