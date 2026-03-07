@@ -1,0 +1,123 @@
+# Voice-OpenClaw Bridge Configuration
+# Copy this to ~/.config/voice-bridge-v2/config.yaml and customize
+
+# Bridge Settings
+bridge:
+  # OpenClaw WebSocket endpoint
+  openclaw_host: "localhost"
+  openclaw_port: 3000
+  websocket_path: "/api/voice"
+  
+  # Reconnection settings
+  reconnect:
+    enabled: true
+    max_retries: 5
+    backoff_base: 1.0  # seconds
+    backoff_max: 30.0  # seconds
+  
+  # Session settings
+  session:
+    persist: true
+    db_path: "~/.local/share/voice-bridge-v2/conversations.db"
+    max_history: 50  # messages to keep in context
+
+# Response Filtering
+filter:
+  # Only speak these message types
+  speak_types:
+    - "final_response"
+    - "clarification"
+    - "error"
+  
+  # Never speak these
+  silent_types:
+    - "thinking"
+    - "tool_call"
+    - "tool_result"
+    - "system"
+  
+  # Heuristic filtering (backup if types missing)
+  heuristic:
+    enabled: true
+    silence_patterns:
+      - "^[Ll]et me"
+      - "^[Ii]'ll"
+      - "^[Ss]earching"
+      - "^\\["  # System markers
+      - "^```"  # Code blocks
+
+# Audio Settings  
+audio:
+  sample_rate: 16000
+  channels: 1
+  dtype: "int16"
+  
+  input:
+    device: null  # null = default device
+    chunk_duration: 0.5  # seconds per chunk
+    
+  output:
+    device: null  # null = default device
+    buffer_size: 512
+
+# Voice Activity Detection
+vad:
+  enabled: true
+  aggressiveness: 2  # 0-3, higher = more aggressive
+  frame_duration: 30  # ms
+  silence_timeout: 2.0  # seconds of silence to stop recording
+
+# Speech-to-Text
+stt:
+  engine: "faster-whisper"
+  model: "medium"  # tiny, base, small, medium, large-v3
+  device: "cuda"  # cuda or cpu
+  compute_type: "float16"
+  beam_size: 5
+  
+  # VAD for Whisper
+  vad_filter: true
+  
+# Text-to-Speech
+tts:
+  engine: "piper"
+  model_path: "./piper/voices/en_US-amy-medium.onnx"
+  piper_binary: "./piper/piper"
+  
+  # Voice characteristics
+  speed: 1.0
+  volume: 1.0
+  
+  # Streaming mode (play chunks as they arrive)
+  streaming: true
+  
+# Wake Word Detection
+wake:
+  enabled: true
+  engine: "porcupine"  # porcupine or openwakeword
+  
+  porcupine:
+    access_key: null  # Get from picovoice.ai
+    keywords: ["computer", "jarvis"]  # Built-in keywords
+    sensitivity: 0.7
+  
+  openwakeword:
+    model_path: null  # Path to .tflite model
+    threshold: 0.5
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "~/.local/share/voice-bridge-v2/bridge.log"
+  max_size: "10MB"
+  backup_count: 5
+
+# Debug Mode
+debug:
+  # Save audio files for debugging
+  save_audio: false
+  audio_dir: "~/.local/share/voice-bridge-v2/audio_debug"
+  
+  # Print all messages (even filtered ones)
+  verbose_filter: false

@@ -1,0 +1,45 @@
+# Voice-OpenClaw Bridge v2 Configuration
+# Generated automatically on first run with detected devices
+
+# Audio device configuration
+audio:
+  # Input device: can be device name (string) or index (integer)
+  # Use "default" for system default, or specific name like "Blue Yeti Nano"
+  input_device: "{{input_device}}"
+  
+  # Output device: can be device name (string) or index (integer)
+  output_device: "{{output_device}}"
+  
+  # Audio settings
+  sample_rate: 16000      # Hz: 16000 (Whisper optimized), 44100, 48000
+  channels: 1             # 1=mono, 2=stereo
+  chunk_size: 1024        # Samples per buffer
+
+# Speech-to-Text configuration
+stt:
+  model: "base"           # tiny, base, small, medium, large
+  language: null          # null=auto-detect, or "en", "es", etc.
+  device: "auto"          # cpu, cuda, auto
+  compute_type: "int8"    # int8, float16, float32
+
+# Text-to-Speech configuration
+tts:
+  voice: "en_US-lessac-medium"  # Piper voice model
+  speed: 1.0                      # 0.5 to 2.0
+  volume: 1.0                     # 0.0 to 2.0
+
+# OpenClaw connection configuration
+openclaw:
+  host: "localhost"       # OpenClaw host
+  port: 8080              # OpenClaw port
+  secure: false           # Use WSS/HTTPS
+  api_key: null           # API key if required
+  timeout: 30.0           # Connection timeout (seconds)
+
+# Bridge behavior configuration
+bridge:
+  wake_word: "hey hal"    # Wake word phrase
+  response_timeout: 10.0  # Max time to wait for response (seconds)
+  max_session_duration: 300.0  # Max session length (seconds)
+  log_level: "INFO"        # DEBUG, INFO, WARNING, ERROR
+  hot_reload: true         # Enable config file watching
