@@ -336,9 +336,11 @@ class TTSEngine:
         Returns:
             Silence as numpy array (int16)
         """
-        # Generate ~100ms of silence per character (rough estimate)
+        # Estimate duration at ~150 ms per word (≈ 400 wpm speaking rate),
+        # with a 300 ms floor so very short phrases have audible silence.
         sample_rate = 22050
-        duration_estimate = len(text) * 0.05  # 50ms per character (rough)
+        word_count = max(1, len(text.split()))
+        duration_estimate = max(0.3, word_count * 0.15)
         n_samples = int(sample_rate * duration_estimate)
         
         # Return silence

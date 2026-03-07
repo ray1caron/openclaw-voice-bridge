@@ -308,12 +308,17 @@ class OpenClawWebSocketClient:
                     max_retries=self.max_retries,
                 )
                 
+                # close_timeout must be shorter than the asyncio.wait_for
+                # timeout — if they are equal the close handshake can fire
+                # after wait_for already raised TimeoutError, causing a
+                # cascading / double-timeout condition.
+                close_timeout = min(5.0, self.config.timeout / 4)
                 self.websocket = await asyncio.wait_for(
                     websockets.connect(
                         self.url,
                         ping_interval=20,
                         ping_timeout=10,
-                        close_timeout=self.config.timeout,
+                        close_timeout=close_timeout,
                     ),
                     timeout=self.config.timeout,
                 )

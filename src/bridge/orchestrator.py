@@ -152,6 +152,8 @@ class VoiceOrchestrator:
         self._wake_ack_pending = False
         self._wake_ack_timer: Optional[threading.Timer] = None
         self._wake_ack_lock = threading.Lock()
+        # Set when stop() is called so in-flight timer callbacks can bail out early
+        self._shutdown_event = threading.Event()
 
         # Event loop reference for safe async dispatch from audio threads.
         # Populated in start() once the loop is guaranteed to be running.
@@ -237,7 +239,10 @@ class VoiceOrchestrator:
                 return False
             
             logger.info("starting_orchestrator")
-            
+
+            # Clear shutdown flag so timer callbacks work after a restart
+            self._shutdown_event.clear()
+
             # Initialize components
             if not self.stt_engine.initialize():
                 logger.warning("stt_initialization_failed")
@@ -277,7 +282,12 @@ class VoiceOrchestrator:
                 return
             
             self._running = False
-            
+
+            # Signal shutdown to any in-flight timer callbacks before
+            # cancelling the timer, so a callback already executing in
+            # another thread sees the flag and exits cleanly.
+            self._shutdown_event.set()
+
             # Cancel wake ack timer if running
             with self._wake_ack_lock:
                 self._wake_ack_pending = False
@@ -447,12 +457,17 @@ class VoiceOrchestrator:
     def _on_wake_ack_timeout(self, ack_config):
         """
         Handle timeout waiting for wake word ack response from OpenClaw.
-        
+
         Falls back to local TTS if enabled, otherwise proceeds to listening state.
-        
+        Guard against being called after stop() — the timer may fire in a
+        thread that is already racing with shutdown.
+
         Args:
             ack_config: WakeAcknowledgementConfig instance
         """
+        if self._shutdown_event.is_set():
+            return
+
         with self._wake_ack_lock:
             if not self._wake_ack_pending:
                 # Already handled
@@ -635,37 +650,53 @@ class VoiceOrchestrator:
     def _on_websocket_message(self, message: dict):
         """
         Handle incoming WebSocket messages.
-        
-        Processes OpenClaw responses and triggers TTS.
-        
+
+        Validates structure before processing to prevent crashes from
+        malformed payloads sent by the OpenClaw gateway.
+
         Args:
             message: Incoming message dict
         """
         if not self._running:
             return
-        
-        msg_type = message.get("type", "")
-        
+
+        # Basic structural validation
+        if not isinstance(message, dict):
+            logger.warning("websocket_message_not_dict", received_type=type(message).__name__)
+            return
+
+        msg_type = message.get("type")
+        if not isinstance(msg_type, str) or not msg_type:
+            logger.warning("websocket_message_missing_type", message_keys=list(message.keys()))
+            return
+
         if msg_type == "voice_response":
+            response_text = message.get("text", "")
+            if not isinstance(response_text, str):
+                logger.warning("voice_response_text_not_string", received_type=type(response_text).__name__)
+                return
+            response_text = response_text.strip()
+            if not response_text:
+                logger.warning("voice_response_empty_text")
+                return
+
             # Check if this is a wake word ack response
             with self._wake_ack_lock:
                 if self._wake_ack_pending and self._state == OrchestratorState.WAKE_WORD_ACK:
-                    # This is the wake word acknowledgement response
-                    response_text = message.get("text", "")
-                    if response_text:
-                        self._on_wake_ack_response(response_text)
-                        return
-            
-            # Process voice response
-            response_text = message.get("text", "")
-            if response_text:
-                self._on_response_received(response_text)
-        
+                    self._on_wake_ack_response(response_text)
+                    return
+
+            self._on_response_received(response_text)
+
         elif msg_type == "control":
-            # Handle control messages
             action = message.get("action", "")
+            if not isinstance(action, str):
+                logger.warning("control_action_not_string", received_type=type(action).__name__)
+                return
             if action == "interrupt":
                 self._handle_barge_in()
+            else:
+                logger.debug("unhandled_control_action", action=action)
     
     def _on_response_received(self, text: str):
         """

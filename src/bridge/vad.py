@@ -24,11 +24,18 @@ except ImportError:
 
 
 class VADMode(enum.Enum):
-    """VAD aggressiveness modes."""
-    NORMAL = 0      # Least aggressive, more false positives
-    LOW = 1         # Low aggressiveness
-    MEDIUM = 2      # Medium aggressiveness (default)
-    HIGH = 3        # Most aggressive, fewer false positives
+    """VAD aggressiveness modes.
+
+    WebRTC VAD aggressiveness is 0–3 where 0 is the MOST aggressive
+    (highest sensitivity, most false positives) and 3 is the LEAST
+    aggressive (highest specificity, fewest false positives).
+    The names below reflect perceived user intent; the numeric values
+    map directly to the webrtcvad API.
+    """
+    VERY_SENSITIVE = 0  # Highest sensitivity — catches quiet/distant speech; most false positives
+    SENSITIVE = 1       # High sensitivity
+    BALANCED = 2        # Balanced sensitivity/specificity (default)
+    STRICT = 3          # Highest specificity — ignores quiet speech; fewest false positives
 
 
 class VADState(enum.Enum):
@@ -41,7 +48,7 @@ class VADState(enum.Enum):
 @dataclass
 class VADConfig:
     """VAD configuration."""
-    mode: VADMode = VADMode.MEDIUM
+    mode: VADMode = VADMode.BALANCED
     frame_duration_ms: int = 30  # 10, 20, or 30ms for WebRTC
     sample_rate: int = 16000
     min_speech_duration_ms: int = 250
@@ -396,12 +403,13 @@ class MockVAD(WebRTCVAD):
         else:
             energy = np.sqrt(np.mean(audio_frame.astype(np.float32) ** 2))
         
-        # Threshold based on mode
+        # Energy thresholds for mock VAD (lower = more sensitive, matching
+        # the WebRTC convention where mode 0 is most sensitive).
         thresholds = {
-            VADMode.NORMAL: 100,
-            VADMode.LOW: 200,
-            VADMode.MEDIUM: 300,
-            VADMode.HIGH: 500
+            VADMode.VERY_SENSITIVE: 100,
+            VADMode.SENSITIVE: 200,
+            VADMode.BALANCED: 300,
+            VADMode.STRICT: 500,
         }
         threshold = thresholds.get(self.config.mode, 300)
         
