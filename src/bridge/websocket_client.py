@@ -199,9 +199,11 @@ class OpenClawWebSocketClient:
         # Use provided config or load from system
         self.config = config or get_config().openclaw
         
-        # Build URL from config
+        # Build URL from config — path is configurable so the endpoint can
+        # be changed without touching code (ws_path in config.yaml).
         protocol = "wss" if self.config.secure else "ws"
-        self.url = f"{protocol}://{self.config.host}:{self.config.port}/api/voice"
+        ws_path = getattr(self.config, "ws_path", "/api/voice")
+        self.url = f"{protocol}://{self.config.host}:{self.config.port}{ws_path}"
         
         # Reconnection settings
         self.max_retries = 5
@@ -219,7 +221,11 @@ class OpenClawWebSocketClient:
         # Session persistence (Issue #20)
         config_obj = get_config()
         self.enable_persistence = config_obj.persistence.enabled
-        
+
+        # Turn counter for persistence. Initialized here so it is always
+        # defined regardless of whether a session is created in _do_connect.
+        self._turn_index: int = 0
+
         # Session recovery (Issue #23)
         self.previous_session_uuid: Optional[str] = None
         self.should_restore_session: bool = False

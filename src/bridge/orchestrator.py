@@ -50,8 +50,8 @@ class OrchestratorStats:
     """Orchestrator statistics."""
     state_changes: int = 0
     wake_word_detections: int = 0
-    completet_transcriptions: int = 0
-    completet_responses: int = 0
+    completed_transcriptions: int = 0
+    completed_responses: int = 0
     barge_in_count: int = 0
     error_count: int = 0
     start_time: float = 0.0
@@ -152,7 +152,11 @@ class VoiceOrchestrator:
         self._wake_ack_pending = False
         self._wake_ack_timer: Optional[threading.Timer] = None
         self._wake_ack_lock = threading.Lock()
-        
+
+        # Event loop reference for safe async dispatch from audio threads.
+        # Populated in start() once the loop is guaranteed to be running.
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+
         # Register callbacks
         self._setup_callbacks()
         
@@ -241,15 +245,22 @@ class VoiceOrchestrator:
             if not self.tts_engine.initialize():
                 logger.warning("tts_initialization_failed")
             
+            # Capture the running event loop so audio-thread callbacks can
+            # safely schedule coroutines via run_coroutine_threadsafe.
+            try:
+                self._event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._event_loop = None
+
             # Start audio pipeline
             if not self.audio_pipeline.start():
                 logger.error("audio_pipeline_start_failed")
                 self._set_state(OrchestratorState.ERROR)
                 return False
-            
+
             # Start wake word detector
             self.wake_word_detector.start()
-            
+
             # Update state
             self._running = True
             self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
@@ -289,7 +300,27 @@ class VoiceOrchestrator:
         """Check if orchestrator is running."""
         with self._running_lock:
             return self._running
-    
+
+    def _dispatch_coroutine(self, coro) -> None:
+        """
+        Schedule a coroutine on the captured event loop from any thread.
+
+        Audio pipeline callbacks run in background threads, so we cannot
+        use asyncio.run() (which would try to create a second loop) or
+        asyncio.create_task() (which requires the calling code to already
+        be in an async context).  run_coroutine_threadsafe() is the correct
+        bridge between threads and a running event loop.
+        """
+        if self._event_loop and self._event_loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, self._event_loop)
+        else:
+            # Fallback for unit-test scenarios where no loop is running yet.
+            try:
+                asyncio.run(coro)
+            except Exception as e:
+                logger.error("dispatch_coroutine_error", error=str(e))
+                self._set_state(OrchestratorState.LISTENING)
+
     # =========================================================================
     # Audio frame callback
     # =========================================================================
@@ -398,11 +429,7 @@ class VoiceOrchestrator:
                     logger.error("wake_ack_http_error", error=str(e))
                     self._on_wake_ack_timeout(ack_config)
             
-            try:
-                loop = asyncio.get_running_loop()
-                asyncio.create_task(send_http_ack())
-            except RuntimeError:
-                asyncio.run(send_http_ack())
+            self._dispatch_coroutine(send_http_ack())
         else:
             # Use WebSocket (legacy mode)
             async def send_ack():
@@ -414,12 +441,8 @@ class VoiceOrchestrator:
                 else:
                     logger.warning("websocket_not_connected_for_wake_ack")
                     self._on_wake_ack_timeout(ack_config)
-            
-            try:
-                loop = asyncio.get_running_loop()
-                asyncio.create_task(send_ack())
-            except RuntimeError:
-                asyncio.run(send_ack())
+
+            self._dispatch_coroutine(send_ack())
     
     def _on_wake_ack_timeout(self, ack_config):
         """
@@ -562,7 +585,7 @@ class VoiceOrchestrator:
         if not self._running:
             return
         
-        self._stats.completet_transcriptions += 1
+        self._stats.completed_transcriptions += 1
         
         if not text.strip():
             logger.warning("empty_transcription")
@@ -603,12 +626,7 @@ class VoiceOrchestrator:
                     logger.error("failed_to_send_to_openclaw")
                     self._set_state(OrchestratorState.LISTENING)
         
-        try:
-            import asyncio
-            asyncio.run(send_to_openclaw())
-        except Exception as e:
-            logger.error("send_to_openclaw_error", error=str(e))
-            self._set_state(OrchestratorState.LISTENING)
+        self._dispatch_coroutine(send_to_openclaw())
     
     # =========================================================================
     # WebSocket callbacks

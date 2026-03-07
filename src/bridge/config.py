@@ -96,29 +96,33 @@ class OpenClawConfig(BaseModel):
     secure: bool = Field(default=False, description="Use WSS/HTTPS")
     api_key: str | None = Field(default=None, description="API key if required")
     timeout: float = Field(default=30.0, ge=1.0, le=300.0)
-    
+    timeout_ms: int = Field(
+        default=30000,
+        ge=1000,
+        le=300000,
+        description="Request timeout in milliseconds for HTTP API calls"
+    )
+
     # HTTP API mode configuration
     api_mode: Literal["http", "websocket"] = Field(
-        default="http", 
+        default="http",
         description="Communication mode: 'http' for REST API, 'websocket' for WebSocket"
     )
+    ws_path: str = Field(
+        default="/api/voice",
+        description="WebSocket endpoint path on the OpenClaw Gateway"
+    )
     auth_token: str | None = Field(
-        default=None, 
+        default=None,
         description="Bearer token for authentication (set OPENCLAW_GATEWAY_TOKEN env var)"
     )
-    
+
     def get_auth_token(self) -> str | None:
         """Get auth token from config or environment variable."""
         if self.auth_token:
             return self.auth_token
         import os
         return os.environ.get("OPENCLAW_GATEWAY_TOKEN")
-    timeout_ms: int = Field(
-        default=30000, 
-        ge=1000, 
-        le=300000, 
-        description="Request timeout in milliseconds for HTTP API calls"
-    )
     
     @field_validator("host")
     @classmethod
@@ -446,16 +450,17 @@ class AppConfig(BaseSettings):
         class ConfigReloadHandler(FileSystemEventHandler):
             def __init__(self, config: AppConfig):
                 self.config = config
-                self._debounce_timer = None
-            
+                self._debounce_timer: Optional[threading.Timer] = None
+
             def on_modified(self, event):
                 if event.src_path == str(config_file):
-                    # Debounce rapid changes
-                    if self.config._watcher and hasattr(self.config._watcher, '_debounce_timer'):
-                        if self.config._watcher._debounce_timer:
-                            self.config._watcher._debounce_timer.cancel()
-                    
-                    import threading
+                    # Cancel any pending reload before scheduling a new one so
+                    # rapid successive saves don't trigger multiple concurrent
+                    # reloads (timer leak fix).
+                    if self._debounce_timer is not None:
+                        self._debounce_timer.cancel()
+                        self._debounce_timer = None
+
                     def reload():
                         try:
                             logger.info("Config file changed, reloading...")
@@ -474,10 +479,11 @@ class AppConfig(BaseSettings):
                             logger.info("Config reloaded successfully")
                         except Exception as e:
                             logger.error("Config reload failed", error=str(e))
-                    
-                    timer = threading.Timer(0.5, reload)
-                    timer.start()
-                    self.config._watcher._debounce_timer = timer
+                        finally:
+                            self._debounce_timer = None
+
+                    self._debounce_timer = threading.Timer(0.5, reload)
+                    self._debounce_timer.start()
         
         handler = ConfigReloadHandler(self)
         self._watcher = Observer()

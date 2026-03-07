@@ -8,7 +8,7 @@ Protocol Version: 1.0.0
 """
 import json
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any
 from uuid import uuid4
 
@@ -26,7 +26,7 @@ class BaseMessage:
     """Base class for all protocol messages."""
     
     type: str = field(default="base")
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     session_id: Optional[str] = None
     
     def to_json(self) -> str:
@@ -66,7 +66,7 @@ class TranscriptMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -84,7 +84,7 @@ class WakeWordMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -102,7 +102,7 @@ class SessionStartMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -119,7 +119,7 @@ class SessionEndMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -136,7 +136,7 @@ class TTSStartMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -153,7 +153,7 @@ class TTSEndMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -171,7 +171,7 @@ class ErrorMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 # =============================================================================
@@ -194,7 +194,7 @@ class ResponseMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -212,7 +212,7 @@ class AcknowledgementMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -229,7 +229,7 @@ class ControlMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -244,7 +244,7 @@ class ConfigUpdateMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 # =============================================================================
@@ -258,7 +258,7 @@ class PingMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -268,7 +268,7 @@ class PongMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -292,7 +292,7 @@ class HelloMessage(BaseMessage):
     
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 # =============================================================================
