@@ -204,7 +204,6 @@ class OpenWakeWordDetector:
             self._frame_count = 0
         self._frame_count += 1
         
-        # DEBUG: Log buffer state on every frame
         logger.debug("oww_frame_start", frame=self._frame_count, buffer_len=len(self._audio_buffer))
         
         # Use error capture context to automatically capture any processing errors
@@ -229,22 +228,22 @@ class OpenWakeWordDetector:
             if len(self._audio_buffer) < FRAME_SIZE:
                 return False
             
-            logger.info("oww_processing_frame", frame=self._frame_count, buffer_len=len(self._audio_buffer))
-            
+            logger.debug("oww_processing_frame", frame=self._frame_count, buffer_len=len(self._audio_buffer))
+
             # Take exactly FRAME_SIZE samples and keep any remainder for next time
             frame_to_process = self._audio_buffer[:FRAME_SIZE].astype(np.float32)
             self._audio_buffer = self._audio_buffer[FRAME_SIZE:]
-            
+
             # Discover model key on first prediction if not yet cached
             if self._model_key is None:
                 # Run a test prediction to discover available keys
                 test_prediction = self.model.predict(frame_to_process)
                 available_keys = list(test_prediction.keys())
-                
+
                 # Find the key that matches our model name with version suffix
                 # Model keys look like: "hey_jarvis_v0.1", "alexa_v0.1", etc.
                 matched_keys = [k for k in available_keys if self.model_name in k]
-                
+
                 if matched_keys:
                     self._model_key = matched_keys[0]
                     logger.info(
@@ -253,6 +252,8 @@ class OpenWakeWordDetector:
                         discovered_key=self._model_key,
                         available_keys=available_keys
                     )
+                    # Reuse this prediction result — key is now known
+                    prediction = test_prediction
                 else:
                     logger.warning(
                         "oww_model_key_not_found",
@@ -260,70 +261,40 @@ class OpenWakeWordDetector:
                         available_keys=available_keys
                     )
                     return False
-            
-            # Run prediction with the buffered frame
-            prediction = self.model.predict(frame_to_process)
-            
+            else:
+                # Run prediction with the buffered frame (single call)
+                prediction = self.model.predict(frame_to_process)
+
             # Get score for our target model using the discovered key
             score = float(prediction.get(self._model_key, 0.0))
-            
-            # DEBUG: Log normalized audio stats for model input
-            if self._frame_count <= 5 or self._frame_count % 20 == 0:
-                logger.info(
-                    "oww_audio_input",
-                    frame=self._frame_count,
-                    buffer_min=float(np.min(frame_to_process)),
-                    buffer_max=float(np.max(frame_to_process)),
-                    buffer_mean=float(np.mean(frame_to_process)),
-                    buffer_std=float(np.std(frame_to_process)),
-                )
-            
-            # DEBUG: Always log scores for troubleshooting (every 10 frames)
-            if self._frame_count % 10 == 0:
-                logger.info(
-                    "oww_score",
-                    frame=self._frame_count,
-                    model_key=self._model_key,
-                    score=round(score, 6),
-                    threshold=self.threshold,
-                    peak_score=round(float(max(prediction.values())), 6) if hasattr(prediction, 'values') else 0,
-                )
-            
+
+            logger.debug(
+                "oww_audio_input",
+                frame=self._frame_count,
+                buffer_min=float(np.min(frame_to_process)),
+                buffer_max=float(np.max(frame_to_process)),
+                buffer_mean=float(np.mean(frame_to_process)),
+                buffer_std=float(np.std(frame_to_process)),
+            )
+
             # Track maximum score seen (for debugging)
             if not hasattr(self, '_max_score'):
                 self._max_score = 0.0
             if score > self._max_score:
                 self._max_score = score
-                logger.info(
+                logger.debug(
                     "oww_score_peak",
                     frame=self._frame_count,
                     new_max=round(score, 6),
                     threshold=self.threshold,
                 )
-            
-            # Run prediction with the buffered frame
-            prediction = self.model.predict(frame_to_process)
-            
-            # Get score for our target model using the discovered key
-            score = prediction.get(self._model_key, 0.0)
-            
-            # DEBUG: Always log first 20 scores for troubleshooting
-            if self._frame_count <= 20:
-                logger.info(
-                    "oww_score_debug",
-                    frame=self._frame_count,
-                    model_key=self._model_key,
-                    score=round(score, 6),
-                    threshold=self.threshold,
-                    all_scores=dict(prediction) if hasattr(prediction, 'items') else str(prediction),
-                )
-            
+
             # Track recent scores for known issue detection (max 100)
             self._recent_scores.append(score)
             if len(self._recent_scores) > 100:
                 self._recent_scores.pop(0)
-            
-            # Check for zero-score known issue
+
+            # Check for zero-score known issue (only once per 100-frame window)
             if len(self._recent_scores) == 100:
                 avg_score = sum(self._recent_scores) / len(self._recent_scores)
                 if avg_score == 0.0:
@@ -336,10 +307,12 @@ class OpenWakeWordDetector:
                         },
                         session_id=None,
                     )
-            
+                    # Reset to avoid re-triggering every frame after detection
+                    self._recent_scores.clear()
+
             # Log score periodically (every 50 frames) or when score is notable
             if self._frame_count % 50 == 0 or score > 0.1:
-                logger.info(
+                logger.debug(
                     "oww_score",
                     model=self._model_key,
                     score=round(score, 4),

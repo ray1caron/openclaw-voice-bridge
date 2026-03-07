@@ -101,7 +101,7 @@ class BargeInHandler:
             
         self._running = True
         self._monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("Barge-in monitor started");
+        logger.info("Barge-in monitor started")
     
     async def stop(self):
         """Stop the barge-in monitor."""
@@ -112,7 +112,7 @@ class BargeInHandler:
                 await self._monitor_task
             except asyncio.CancelledError:
                 pass
-        logger.info("Barge-in monitor stopped");
+        logger.info("Barge-in monitor stopped")
     
     async def _monitor_loop(self):
         """Main monitoring loop for barge-in detection."""
@@ -199,7 +199,7 @@ class BargeInHandler:
         logger.info(
             f"Barge-in detected: energy={energy:.3f}, latency={latency_ms:.1f}ms, "
             f"confidence={event.confidence:.2f}"
-        );
+        )
         
         # Notify handler
         if self.on_interruption:
@@ -230,7 +230,7 @@ class BargeInHandler:
             if self.on_state_change and old_state != new_state:
                 await self._safe_callback(self.on_state_change, old_state, new_state)
             
-            logger.debug(f"Barge-in state: {old_state.name} -> {new_state.name}");
+            logger.debug(f"Barge-in state: {old_state.name} -> {new_state.name}")
     
     async def start_speaking(self):
         """Call when assistant starts speaking."""

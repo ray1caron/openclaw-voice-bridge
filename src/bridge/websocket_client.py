@@ -17,6 +17,8 @@ import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 
 from bridge.config import get_config, OpenClawConfig
+from bridge.errorcapture import ErrorCapture
+from bridge.bug_tracker import BugSeverity
 
 logger = structlog.get_logger()
 
@@ -238,7 +240,14 @@ class OpenClawWebSocketClient:
         
         # Connection lock to prevent race conditions
         self._connection_lock = asyncio.Lock()
-        
+
+        # Error capture for automatic bug tracking
+        self.error_capture = ErrorCapture(
+            component="websocket",
+            severity=BugSeverity.HIGH,
+            reraise=False,
+        )
+
         logger.info(
             "WebSocket client initialized",
             url=self.url,
@@ -442,6 +451,7 @@ class OpenClawWebSocketClient:
                 
             except Exception as e:
                 logger.error("Unexpected error during connection", error=str(e))
+                self.error_capture.run(lambda: (_ for _ in ()).throw(e))
                 self._connection_attempts += 1
                 self._set_state(ConnectionState.ERROR)
                 break
@@ -717,6 +727,7 @@ class OpenClawWebSocketClient:
             raise
         except Exception as e:
             logger.error("Error in receive loop", error=str(e))
+            self.error_capture.run(lambda: (_ for _ in ()).throw(e))
             self._set_state(ConnectionState.ERROR)
     
     async def _ping_loop(self) -> None:

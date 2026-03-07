@@ -41,7 +41,7 @@ class STTConfig:
     compute_type: str = "int8"
     language: str | None = None
     beam_size: int = 5
-    vad_filter: bool = True
+    vad_filter: bool = False  # Disabled: the audio pipeline uses WebRTC VAD; double-filtering adds latency
     vad_threshold: float = 0.5
 
 
@@ -118,14 +118,6 @@ class STTEngine:
         """Get current STT state."""
         with self._state_lock:
             return self._state
-
-    def set_on_transcription(self, callback: Callable[[str, float], None]):
-        """Set transcription callback.
-        
-        Args:
-            callback: Function called with (text, confidence) when transcription completes
-        """
-        self._on_transcription = callback
 
     def _set_state(self, new_state: STTState):
         """Set STT state."""
@@ -327,12 +319,12 @@ class STTEngine:
                 return "[mock transcription - silence]", 0.5
         return "", 0.0
 
-    def set_on_transcription(self, callback: Callable[[str], None]):
+    def set_on_transcription(self, callback: Callable[[str, float], None]):
         """
         Register callback for transcription results.
 
         Args:
-            callback: Function taking transcribed text as parameter
+            callback: Function called with (text, confidence) when transcription completes
         """
         self._on_transcription = callback
         logger.info("on_transcription_callback_registered")

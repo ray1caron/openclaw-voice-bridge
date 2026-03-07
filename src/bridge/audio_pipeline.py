@@ -677,8 +677,25 @@ class AudioPipeline:
             try:
                 self._audio_queue.put_nowait(audio_bytes)
             except queue.Full:
+                # Queue is full — evict the oldest frame so the pipeline
+                # always receives the freshest audio.  This is preferable
+                # to silently dropping the incoming frame, which would bias
+                # the VAD toward stale data.
+                try:
+                    self._audio_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._audio_queue.put_nowait(audio_bytes)
+                except queue.Full:
+                    pass  # Extremely rare race; accept the loss
                 self._stats.queue_overflow_count += 1
-                logger.warning("audio_queue_full", count=self._stats.queue_overflow_count)
+                if self._stats.queue_overflow_count % 50 == 1:
+                    # Log only on first occurrence and every 50th to avoid flooding
+                    logger.warning(
+                        "audio_queue_overflow_evicting_oldest",
+                        total_overflows=self._stats.queue_overflow_count,
+                    )
     
     def _on_speech_segment(self, segment: SpeechSegment):
         """

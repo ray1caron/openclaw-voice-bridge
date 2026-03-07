@@ -6,7 +6,7 @@ and audio output as numpy arrays.
 import io
 import wave
 from pathlib import Path
-from typing import Optional, Callable, List, Tuple
+from typing import Optional, Callable, Dict, List, Tuple
 
 import structlog
 import numpy as np
@@ -28,6 +28,16 @@ except ImportError:
 # Default voice model path
 DEFAULT_VOICE_DIR = Path.home() / ".voice-bridge" / "voices"
 DEFAULT_VOICE = "en_US-lessac-medium"
+
+# Common short acknowledgement phrases that are pre-synthesized at startup
+# to eliminate inference latency on the wake-word response path.
+PRELOAD_PHRASES = [
+    "Yes?",
+    "I'm listening.",
+    "How can I help?",
+    "Go ahead.",
+    "Ready.",
+]
 
 
 class TTSState:
@@ -66,10 +76,14 @@ class TTSEngine:
         self._state = TTSState.IDLE
         self._available_voices: List[str] = []
         self._on_audio_generated: Optional[Callable[[np.ndarray], None]] = None
-        
+
+        # Phrase cache: pre-synthesized audio for common ack phrases so the
+        # wake-word response path hits a buffer copy instead of NN inference.
+        self._phrase_cache: Dict[str, np.ndarray] = {}
+
         # Error capture for automatic bug tracking
         self.error_capture = ErrorCapture(component="tts", severity=BugSeverity.MEDIUM)
-        
+
         # Ensure voice directory exists
         self.voice_dir.mkdir(parents=True, exist_ok=True)
     
@@ -138,15 +152,19 @@ class TTSEngine:
             
             # Scan for available voices
             self._scan_voices()
-            
+
             self._state = TTSState.IDLE
-            
+
             logger.info(
                 "tts_voice_loaded",
                 voice=self.voice_name,
                 model=str(model_path)
             )
-            
+
+            # Pre-synthesize common ack phrases to eliminate inference latency
+            # on the wake-word response path.
+            self._warm_phrase_cache()
+
             return True
             
         except Exception as e:
@@ -200,6 +218,42 @@ class TTSEngine:
         
         return None
     
+    def _warm_phrase_cache(self) -> None:
+        """Pre-synthesize common ack phrases and store in cache.
+
+        Called once after the voice model is loaded. Synthesis happens
+        synchronously here (at startup) so subsequent speak() calls for
+        these phrases return instantly from the cache.
+        """
+        for phrase in PRELOAD_PHRASES:
+            try:
+                audio = self._synthesize(phrase)
+                self._phrase_cache[phrase.lower().strip()] = audio
+                logger.debug("tts_phrase_cached", phrase=phrase)
+            except Exception as e:
+                logger.warning("tts_phrase_cache_failed", phrase=phrase, error=str(e))
+        logger.info("tts_phrase_cache_warmed", count=len(self._phrase_cache))
+
+    def _synthesize(self, text: str) -> np.ndarray:
+        """Run Piper inference and return int16 audio. Internal helper."""
+        from piper.config import SynthesisConfig
+        syn_config = SynthesisConfig(
+            noise_scale=0.667,
+            length_scale=1.0 / self.speed,
+            noise_w_scale=0.8,
+        )
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            self._voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+        wav_buffer.seek(0)
+        with wave.open(wav_buffer, 'rb') as wav_file:
+            n_frames = wav_file.getnframes()
+            audio_data = wav_file.readframes(n_frames)
+        audio = np.frombuffer(audio_data, dtype=np.int16)
+        if self.volume != 1.0:
+            audio = (audio * self.volume).clip(-32768, 32767).astype(np.int16)
+        return audio
+
     def _scan_voices(self):
         """Scan for available voice models."""
         self._available_voices.clear()
@@ -217,63 +271,38 @@ class TTSEngine:
     def speak(self, text: str) -> np.ndarray:
         """
         Generate speech audio from text.
-        
+
+        Checks the phrase cache first so common ack phrases (pre-synthesized
+        at startup) return immediately without NN inference overhead.
+
         Args:
             text: Text to synthesize
-            
+
         Returns:
             Audio samples as numpy array (int16)
         """
         if not PIPER_AVAILABLE or self._voice is None:
-            # Fallback: return silence
+            logger.warning("tts_not_available_returning_silence", text=text[:50])
             return self._mock_audio(text)
-        
+
+        # Fast path: return pre-synthesized audio from cache
+        cache_key = text.lower().strip()
+        if cache_key in self._phrase_cache:
+            logger.debug("tts_cache_hit", text=text)
+            return self._phrase_cache[cache_key].copy()
+
         with self.error_capture.context(context="speak"):
             try:
                 self._state = TTSState.GENERATING
-                
-                # Create synthesis config
-                syn_config = SynthesisConfig(
-                    noise_scale=0.667,
-                    length_scale=1.0 / self.speed,  # Speed adjustment
-                    noise_w_scale=0.8,
-                )
-                
-                # Synthesize to WAV in memory
-                wav_buffer = io.BytesIO()
-                
-                with wave.open(wav_buffer, 'wb') as wav_file:
-                    self._voice.synthesize_wav(
-                        text,
-                        wav_file,
-                        syn_config=syn_config,
-                    )
-                
-                # Read WAV data
-                wav_buffer.seek(0)
-                with wave.open(wav_buffer, 'rb') as wav_file:
-                    sample_rate = wav_file.getframerate()
-                    n_frames = wav_file.getnframes()
-                    audio_data = wav_file.readframes(n_frames)
-                
-                # Convert to numpy int16
-                audio = np.frombuffer(audio_data, dtype=np.int16)
-                
-                # Apply volume
-                if self.volume != 1.0:
-                    audio = (audio * self.volume).clip(-32768, 32767).astype(np.int16)
-                
+                audio = self._synthesize(text)
                 self._state = TTSState.IDLE
-                
                 logger.debug(
                     "tts_synthesized",
                     text_length=len(text),
                     audio_length=len(audio),
-                    sample_rate=sample_rate
                 )
-                
                 return audio
-                
+
             except Exception as e:
                 self._state = TTSState.ERROR
                 logger.error("tts_synthesis_failed", text=text[:50], error=str(e))
@@ -336,9 +365,10 @@ class TTSEngine:
         Returns:
             Silence as numpy array (int16)
         """
-        # Generate ~100ms of silence per character (rough estimate)
+        # Estimate duration at ~150ms per word with a 300ms floor
         sample_rate = 22050
-        duration_estimate = len(text) * 0.05  # 50ms per character (rough)
+        word_count = max(1, len(text.split()))
+        duration_estimate = max(0.3, word_count * 0.15)
         n_samples = int(sample_rate * duration_estimate)
         
         # Return silence

@@ -168,21 +168,29 @@ async def main():
             logger.info("Speech recognized", text=text, confidence=f"{confidence:.2f}")
         
         def on_response(text: str):
+            """Handle response from OpenClaw — log and speak via TTS."""
             logger.info("Response received", text=text[:100] + "..." if len(text) > 100 else text)
-        
+            # Route the response through the orchestrator so it is spoken.
+            try:
+                orchestrator._on_response_received(text)
+            except Exception as e:
+                logger.error("Failed to route response to TTS", error=str(e))
+
         def on_state_change(old_state: OrchestratorState, new_state: OrchestratorState):
             logger.debug("State changed", old=old_state.value, new=new_state.value)
-        
+
         def on_error(error: Exception):
             logger.error("Orchestrator error", error=str(error))
-        
+
         orchestrator.on_wake_word = on_wake_word
         orchestrator.on_speech_end = on_speech_end
         orchestrator.on_response = on_response
         orchestrator.on_state_change = on_state_change
         orchestrator.on_error = on_error
-        
-        # Register WebSocket server callback for OpenClaw responses
+
+        # Register WebSocket server callback for OpenClaw responses.
+        # When OpenClaw connects to our server and sends a voice_response,
+        # this ensures it is routed to TTS just like the client path.
         if ws_server:
             ws_server.on_response(on_response)
             logger.info("WebSocket response callback registered")
@@ -247,8 +255,8 @@ async def main():
         logger.info(
             "Voice bridge stopped",
             wake_word_detections=stats.wake_word_detections,
-            transcriptions=stats.completet_transcriptions,
-            responses=stats.completet_responses,
+            transcriptions=stats.completed_transcriptions,
+            responses=stats.completed_responses,
             barge_ins=stats.barge_in_count,
             uptime_seconds=stats.uptime_seconds,
         )
