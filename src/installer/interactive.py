@@ -1450,15 +1450,36 @@ class InteractiveInstaller:
             if response and hasattr(response, 'content') and response.content:
                 print(f"\n{response.content}\n")
                 print("  " + "-" * 50)
-                
+
                 # Show metadata
                 if hasattr(response, 'model'):
                     print(f"\n  Model: {response.model}")
                 if hasattr(response, 'finish_reason'):
                     print(f"  Finish Reason: {response.finish_reason}")
-                
+
                 print(f"  Response Length: {len(response.content)} characters")
-                
+
+                # Speak the response via TTS so the user hears it
+                print("\n  🔊 Playing response via TTS...")
+                try:
+                    from bridge.tts import TTSEngine
+                    import sounddevice as sd
+                    tts = TTSEngine()
+                    if tts.initialize():
+                        audio = tts.speak(response.content)
+                        if audio is not None and len(audio) > 0:
+                            sd.play(audio, samplerate=22050)
+                            sd.wait()
+                            print("  ✅ TTS playback: OK")
+                        else:
+                            print("  ⚠️  TTS returned empty audio")
+                    else:
+                        print("  ⚠️  TTS engine not available (voice model missing?)")
+                except ImportError:
+                    print("  ⚠️  TTS/audio libraries not available — skipping playback")
+                except Exception as e:
+                    print(f"  ⚠️  TTS playback failed: {e}")
+
                 self.print_success("Integration test passed!")
                 print("  ✅ Wake word simulation: OK")
                 print("  ✅ Message sending: OK")
