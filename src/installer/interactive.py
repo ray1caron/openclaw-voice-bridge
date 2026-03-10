@@ -696,6 +696,82 @@ class InteractiveInstaller:
             if result.error:
                 print(f"     Error: {result.error}")
     
+    def _probe_openclaw_verbose(self, host: str, port: int, auth_token: str | None) -> None:
+        """Run a verbose HTTP probe against OpenClaw and print curl-equivalent output.
+
+        Shows the user exactly what command would be used and what OpenClaw returns,
+        making it easy to diagnose slow/wrong responses before the timed test runs.
+        """
+        import json
+        import socket
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = f"http://{host}:{port}/v1/chat/completions"
+        payload = json.dumps({
+            "model": "openclaw:main",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5,
+        })
+
+        # Print the equivalent curl command so the user can reproduce it manually
+        token_flag = (
+            f' \\\n    -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN"'
+            if auth_token else ""
+        )
+        print("  Equivalent curl command:")
+        print(f"    curl -v --max-time 10 \\")
+        print(f"      -H \"Content-Type: application/json\"{token_flag} \\")
+        print(f"      -d '{payload}' \\")
+        print(f"      {url}")
+        print()
+
+        # Run the probe with a generous 10-second timeout
+        headers = {"Content-Type": "application/json"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        req = urllib.request.Request(
+            url, data=payload.encode("utf-8"), headers=headers, method="POST"
+        )
+
+        print("  Probing OpenClaw (10s timeout)...")
+        start = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                elapsed = (time.time() - start) * 1000
+                body = resp.read(512).decode("utf-8", errors="replace")
+                print(f"  > HTTP {resp.status}  ({elapsed:.0f}ms)")
+                # Pretty-print JSON if possible
+                try:
+                    parsed = json.loads(body)
+                    choices = parsed.get("choices", [])
+                    preview = choices[0]["message"]["content"].strip() if choices else body[:120]
+                    print(f"  > Response: {preview[:120]}")
+                except Exception:
+                    print(f"  > Body: {body[:120]}")
+
+        except urllib.error.HTTPError as exc:
+            elapsed = (time.time() - start) * 1000
+            print(f"  > HTTP {exc.code} {exc.reason}  ({elapsed:.0f}ms)")
+            try:
+                body = exc.read(256).decode("utf-8", errors="replace")
+                if body.strip():
+                    print(f"  > Body: {body[:200]}")
+            except Exception:
+                pass
+
+        except urllib.error.URLError as exc:
+            elapsed = (time.time() - start) * 1000
+            print(f"  > Failed: {exc.reason}  ({elapsed:.0f}ms)")
+
+        except (socket.timeout, OSError) as exc:
+            elapsed = (time.time() - start) * 1000
+            print(f"  > Failed: {exc}  ({elapsed:.0f}ms)")
+
+        print()
+
     def _check_openclaw_connection(self) -> bool:
         """Check if OpenClaw is running and accessible.
 
@@ -1086,6 +1162,16 @@ class InteractiveInstaller:
         ws_passed = self._test_websocket_server()
         print()
         
+        # Verbose probe first — shows curl equivalent + raw response before the timed test
+        try:
+            from bridge.config import get_config
+            _cfg = get_config().openclaw
+            _token = _cfg.get_auth_token() if hasattr(_cfg, "get_auth_token") else getattr(_cfg, "auth_token", None)
+            print("  Testing OpenClaw HTTP endpoint...")
+            self._probe_openclaw_verbose(_cfg.host, _cfg.port, _token)
+        except Exception:
+            pass  # config unreadable — the connection test will surface the error
+
         # Check if OpenClaw is available
         openclaw_running = self._check_openclaw_connection()
         
