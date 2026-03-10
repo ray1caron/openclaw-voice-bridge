@@ -689,11 +689,14 @@ class InteractiveInstaller:
             if result.error:
                 print(f"     Error: {result.error}")
     
-    def _probe_openclaw_verbose(self, host: str, port: int, auth_token: str | None) -> None:
+    def _probe_openclaw_verbose(self, host: str, port: int, auth_token: str | None) -> bool:
         """Run a verbose HTTP probe against OpenClaw and print curl-equivalent output.
 
         Shows the user exactly what command would be used and what OpenClaw returns,
         making it easy to diagnose slow/wrong responses before the timed test runs.
+
+        Returns:
+            True if probe succeeded (HTTP 200), False otherwise.
         """
         import json
         import socket
@@ -744,6 +747,8 @@ class InteractiveInstaller:
                     print(f"  > Response: {preview[:120]}")
                 except Exception:
                     print(f"  > Body: {body[:120]}")
+                print()
+                return resp.status == 200
 
         except urllib.error.HTTPError as exc:
             elapsed = (time.time() - start) * 1000
@@ -756,16 +761,20 @@ class InteractiveInstaller:
                 pass
             if exc.code in (401, 403):
                 self._show_auth_token_diagnostic()
+            print()
+            return False
 
         except urllib.error.URLError as exc:
             elapsed = (time.time() - start) * 1000
             print(f"  > Failed: {exc.reason}  ({elapsed:.0f}ms)")
+            print()
+            return False
 
         except (socket.timeout, OSError) as exc:
             elapsed = (time.time() - start) * 1000
             print(f"  > Failed: {exc}  ({elapsed:.0f}ms)")
-
-        print()
+            print()
+            return False
 
     def _show_auth_token_diagnostic(self) -> None:
         """Auto-discover OpenClaw auth token; fall back to manual entry if not found."""
@@ -1299,16 +1308,20 @@ class InteractiveInstaller:
         print()
         
         # Verbose probe first — shows curl equivalent + raw response before the timed test
+        probe_ok = False
         try:
             from bridge.config import get_config
             _cfg = get_config().openclaw
             _token = _cfg.get_auth_token() if hasattr(_cfg, "get_auth_token") else getattr(_cfg, "auth_token", None)
             print("  Testing OpenClaw HTTP endpoint...")
-            self._probe_openclaw_verbose(_cfg.host, _cfg.port, _token)
+            probe_ok = self._probe_openclaw_verbose(_cfg.host, _cfg.port, _token)
         except Exception:
             pass  # config unreadable — the connection test will surface the error
 
-        # Check if OpenClaw is available
+        # If the probe timed out, OpenClaw may have been cold-starting. Run a
+        # second check to give it a chance to respond now that it is warm.
+        if not probe_ok:
+            print("  Retrying connection check (OpenClaw may have been cold-starting)...")
         openclaw_running = self._check_openclaw_connection()
         
         if not openclaw_running:
