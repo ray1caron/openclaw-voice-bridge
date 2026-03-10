@@ -1297,13 +1297,16 @@ class InteractiveInstaller:
         print("  3. Configure audio devices:")
         print("     Edit ~/.voice-bridge/config.yaml")
         print()
-        
-        self.print_success("Installation successful!")
-        
+
+        if not self._diag.has_issues:
+            self.print_success("Installation successful!")
+
         print("\n" + "=" * 60)
-        
-        # Ask if user wants to start the bridge
-        if self.prompt_yes_no("\nWould you like to start Voice Bridge now?", default=True):
+
+        # Ask if user wants to start the bridge (skip if blocking issues exist)
+        if self._diag.has_blocking:
+            print("\nFix the blocking issues above before starting Voice Bridge.")
+        elif self.prompt_yes_no("\nWould you like to start Voice Bridge now?", default=True):
             print("\n  🎙️  Starting Voice Bridge...\n")
             
             # Set PYTHONPATH and run
