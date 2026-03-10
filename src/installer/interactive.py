@@ -761,6 +761,8 @@ class InteractiveInstaller:
                     print(f"  > Body: {body[:200]}")
             except Exception:
                 pass
+            if exc.code in (401, 403):
+                self._show_auth_token_diagnostic()
 
         except urllib.error.URLError as exc:
             elapsed = (time.time() - start) * 1000
@@ -771,6 +773,50 @@ class InteractiveInstaller:
             print(f"  > Failed: {exc}  ({elapsed:.0f}ms)")
 
         print()
+
+    def _show_auth_token_diagnostic(self) -> None:
+        """Show auth token sources — config file value and env var — to diagnose 401 errors."""
+        import os
+
+        print()
+        print("  Auth token diagnostic:")
+
+        # Check env var
+        env_val = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+        if env_val:
+            print(f"  > $OPENCLAW_GATEWAY_TOKEN : set ({len(env_val)} chars)")
+        else:
+            print("  > $OPENCLAW_GATEWAY_TOKEN : NOT SET (empty)")
+
+        # Grep config file for auth_token line
+        candidates = [
+            os.path.expanduser("~/.voice-bridge/config.yaml"),
+            "config.yaml",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        for line in f:
+                            if "auth_token" in line:
+                                stripped = line.strip()
+                                # Mask the value if present, keep the key visible
+                                if ":" in stripped:
+                                    key, _, val = stripped.partition(":")
+                                    val = val.strip().strip('"').strip("'")
+                                    masked = (val[:4] + "****") if len(val) > 4 else ("****" if val else "(empty)")
+                                    print(f"  > {path}: {key}: {masked}")
+                                else:
+                                    print(f"  > {path}: {stripped}")
+                except OSError:
+                    print(f"  > {path}: (could not read)")
+                break
+        else:
+            print("  > config.yaml: not found in default locations")
+
+        print()
+        print("  Fix: ensure the token in config.yaml matches what OpenClaw expects,")
+        print("       or export it: export OPENCLAW_GATEWAY_TOKEN='your-token-here'")
 
     def _check_openclaw_connection(self) -> bool:
         """Check if OpenClaw is running and accessible.
