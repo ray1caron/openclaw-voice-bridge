@@ -133,8 +133,8 @@ mkdir -p "$HOME/.local/state/voice-bridge/logs"
 if [ ! -f "$HOME/.voice-bridge/config.yaml" ]; then
     echo ""
     echo "Creating default config..."
-    if [ -f "$SCRIPT_DIR/config.yaml" ]; then
-        cp "$SCRIPT_DIR/config.yaml" "$HOME/.voice-bridge/config.yaml"
+    if [ -f "$WORKSPACE/config.yaml" ]; then
+        cp "$WORKSPACE/config.yaml" "$HOME/.voice-bridge/config.yaml"
     fi
 fi
 

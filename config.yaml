@@ -1,4 +1,4 @@
-# Voice Bridge v3 Configuration
+# Voice Bridge Configuration
 # Copy this file to ~/.voice-bridge/config.yaml
 
 # OpenClaw Connection
@@ -6,8 +6,11 @@ openclaw:
   host: "localhost"
   port: 18789
   secure: false
-  api_key: ""  # Set this if OpenClaw requires authentication
   timeout: 30.0
+  timeout_ms: 30000
+  api_mode: "http"          # "http" or "websocket"
+  ws_path: "/api/voice"
+  auth_token: null           # Or set OPENCLAW_GATEWAY_TOKEN env var
 
 # Audio Settings
 audio:
@@ -16,32 +19,48 @@ audio:
   sample_rate: 16000
   channels: 1
   chunk_size: 1024
+  wake_word_frame_size: 1280  # 80ms at 16kHz
 
 # Speech-to-Text (Whisper)
 stt:
-  model: "base"     # Options: tiny, base, small, medium, large-v3
-  language: null     # null = auto-detect
-  device: "cuda"     # Options: cpu, cuda, auto
+  model: "base"              # Options: tiny, base, small, medium, large-v3
+  language: null             # null = auto-detect
+  device: "auto"             # Options: cpu, cuda, auto
   compute_type: "int8"
+  beam_size: 5
+  vad_filter: false          # Disabled - uses WebRTC VAD instead
+  vad_threshold: 0.5
 
 # Text-to-Speech (Piper)
 tts:
-  voice: "en_US-lessac-medium"  # Default voice
+  voice: "en_US-lessac-medium"
   speed: 1.0
   volume: 1.0
 
+# Wake Word Detection
+wake_word:
+  wake_word: "computer"      # Phrase to listen for
+  backend: "stt"             # "stt" (reliable) or "openwakeword" (fast)
+  openwakeword_model: "hey_mycroft"
+  openwakeword_threshold: 0.15
+  refractory_seconds: 2.0
+
 # Bridge Behavior
 bridge:
-  wake_word: "hey hal"
   response_timeout: 10.0
   max_session_duration: 300.0
-  log_level: "INFO"    # Options: DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO"          # Options: DEBUG, INFO, WARNING, ERROR
   hot_reload: true
+  acknowledgement:
+    enabled: true
+    response_phrase: "Yes?"
+    timeout_ms: 5000
+    fallback_to_local_tts: true
 
 # Session Persistence
 persistence:
   enabled: true
-  db_path: null        # null = use default path
+  db_path: null              # null = use default path
   ttl_minutes: 30
   max_history: 10
   cleanup_interval: 60
