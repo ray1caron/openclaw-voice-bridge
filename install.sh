@@ -15,7 +15,7 @@ elif [[ -f "$PROJECT_DIR/src/installer/__init__.py" ]]; then
     cd "$PROJECT_DIR"
 else
     echo "Error: Cannot find installer module"
-    echo "Please run this script from the voice-bridge-v4 directory"
+    echo "Please run this script from the openclaw-voice-bridge directory"
     exit 1
 fi
 
