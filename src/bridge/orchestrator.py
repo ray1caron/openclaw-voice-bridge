@@ -155,6 +155,10 @@ class VoiceOrchestrator:
         # Set when stop() is called so in-flight timer callbacks can bail early
         self._shutdown_event = threading.Event()
 
+        # Buffer for speech segments captured during wake_word_ack (user speaks
+        # their command before/during the "Yes?" acknowledgement audio).
+        self._buffered_speech_segment: Optional[object] = None
+
         # Event loop reference for safe async dispatch from audio threads.
         # Populated in start() once the loop is guaranteed to be running.
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -195,6 +199,7 @@ class VoiceOrchestrator:
     
     def _set_state(self, new_state: OrchestratorState):
         """Set orchestrator state and notify callbacks."""
+        buffered = None
         with self._state_lock:
             old_state = self._state
             if old_state != new_state:
@@ -205,13 +210,22 @@ class VoiceOrchestrator:
                     old=old_state.value,
                     new=new_state.value
                 )
-                
+
+                # Drain any speech segment buffered during wake_word_ack
+                if new_state == OrchestratorState.LISTENING and self._buffered_speech_segment is not None:
+                    buffered = self._buffered_speech_segment
+                    self._buffered_speech_segment = None
+
                 # Notify callbacks
                 for callback in self._state_callbacks:
                     try:
                         callback(old_state, new_state)
                     except Exception as e:
                         logger.error("state_callback_error", error=str(e))
+
+        if buffered is not None:
+            logger.info("replaying_buffered_speech_segment", duration_ms=buffered.duration_ms)
+            self._on_speech_segment(buffered)
     
     def add_state_callback(self, callback: Callable[[OrchestratorState, OrchestratorState], None]):
         """Add state change callback."""
@@ -560,6 +574,13 @@ class VoiceOrchestrator:
         if not self._running:
             return
         
+        # Buffer speech captured during wake_word_ack so we can replay it once
+        # the acknowledgement finishes and we enter LISTENING state.
+        if self._state == OrchestratorState.WAKE_WORD_ACK:
+            logger.info("buffering_speech_segment_during_wake_ack", duration_ms=segment.duration_ms)
+            self._buffered_speech_segment = segment
+            return
+
         # Only process if in LISTENING state (after wake word)
         if self._state != OrchestratorState.LISTENING:
             return
