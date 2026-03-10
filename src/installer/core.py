@@ -32,6 +32,7 @@ class InstallStep(Enum):
     HARDWARE_CHECK = "hardware_check"
     DEPENDENCIES = "dependencies"
     CONFIGURATION = "configuration"
+    OPENCLAW_CONNECTION = "openclaw_connection"
     BUG_CHECK = "bug_check"
     FINAL = "final"
 
@@ -161,12 +162,17 @@ class Installer:
         self.results.append(result)
         all_success = all_success and result.success
         
-        # Step 6: Bug Check
+        # Step 6: OpenClaw Connection
+        result = self._run_openclaw_check()
+        self.results.append(result)
+        all_success = all_success and result.success
+
+        # Step 7: Bug Check
         result = self._run_bug_check()
         self.results.append(result)
         all_success = all_success and result.success
         
-        # Step 7: Final
+        # Step 8: Final
         result = self._run_final()
         self.results.append(result)
         
@@ -530,11 +536,64 @@ class Installer:
                 can_continue=True,
             )
     
+    def _run_openclaw_check(self) -> InstallResult:
+        """Test the connection to OpenClaw before the bridge starts."""
+        start = time.time()
+        self._emit_step_start(InstallStep.OPENCLAW_CONNECTION)
+        self._emit_message("\n🔌 Step 6: Testing OpenClaw connection...")
+
+        try:
+            from bridge.config import get_config
+            cfg = get_config().openclaw
+            endpoint = f"{cfg.host}:{cfg.port}"
+            self._emit_message(f"  Connecting to {endpoint} ...")
+
+            from installer.openclaw_test import test_openclaw_connection
+            timeout = min(cfg.timeout, 10.0)
+            result = test_openclaw_connection(cfg.host, cfg.port, timeout=timeout)
+            hw = result.as_hardware_result()
+            duration_ms = int((time.time() - start) * 1000)
+
+            if result.passed:
+                self._emit_message(f"  {hw}")
+                return InstallResult(
+                    step=InstallStep.OPENCLAW_CONNECTION,
+                    success=True,
+                    message=f"OpenClaw reachable at {endpoint} ({result.latency_ms:.0f}ms)",
+                    duration_ms=duration_ms,
+                )
+            else:
+                self._emit_message(f"  {hw}")
+                if hw.details:
+                    for line in hw.details.splitlines():
+                        self._emit_message(f"  {line}")
+                return InstallResult(
+                    step=InstallStep.OPENCLAW_CONNECTION,
+                    success=False,
+                    message=f"Cannot reach OpenClaw at {endpoint}",
+                    details=(
+                        f"The voice bridge will not work until OpenClaw is running.\n"
+                        f"  Start OpenClaw, then re-run: python -m installer"
+                    ),
+                    duration_ms=duration_ms,
+                    can_continue=True,
+                )
+
+        except Exception as e:
+            self.logger.error("OpenClaw connection check failed", error=str(e))
+            return InstallResult(
+                step=InstallStep.OPENCLAW_CONNECTION,
+                success=False,
+                message=f"OpenClaw check error: {e}",
+                duration_ms=int((time.time() - start) * 1000),
+                can_continue=True,
+            )
+
     def _run_bug_check(self) -> InstallResult:
         """Check bug tracker for known issues."""
         start = time.time()
         self._emit_step_start(InstallStep.BUG_CHECK)
-        self._emit_message("\n🐛 Step 6: Checking known issues...")
+        self._emit_message("\n🐛 Step 7: Checking known issues...")
         
         try:
             from installer.bug_display import get_bug_summary
@@ -604,7 +663,7 @@ class Installer:
         """Final installation step."""
         start = time.time()
         self._emit_step_start(InstallStep.FINAL)
-        self._emit_message("\n✅ Step 7: Installation Summary")
+        self._emit_message("\n✅ Step 8: Installation Summary")
         self._emit_message("=" * 50)
         
         duration_ms = int((time.time() - start) * 1000)
