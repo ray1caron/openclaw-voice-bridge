@@ -33,6 +33,9 @@ class InteractiveInstaller:
         self.workspace = workspace or Path.cwd()
         self.logger = structlog.get_logger()
         self.results = []
+        from installer.diagnostic import DiagnosticReport
+        self._diag = DiagnosticReport()
+        self._openclaw_test_result = None  # set by _step_integration_test
         
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -695,31 +698,24 @@ class InteractiveInstaller:
     
     def _check_openclaw_connection(self) -> bool:
         """Check if OpenClaw is running and accessible.
-        
+
+        Uses a real TCP + HTTP test so we don't falsely report success.
+
         Returns:
-            True if OpenClaw is available
+            True if OpenClaw is reachable and responding
         """
         try:
-            import asyncio
-            from bridge.http_client import OpenClawHTTPClient
             from bridge.config import get_config
-            
-            config = get_config()
-            
-            # Use HTTP client to check connection
-            client = OpenClawHTTPClient(config=config.openclaw)
-            
-            # HTTP client doesn't need persistent connection
-            # Just check if we can reach the server
-            self.logger.info(
-                "http_client_check",
-                base_url=client.base_url,
-                mode="http"
+            from installer.openclaw_test import test_openclaw_connection
+            cfg = get_config().openclaw
+            result = test_openclaw_connection(
+                host=cfg.host,
+                port=cfg.port,
+                timeout=min(cfg.timeout, 5.0),
+                auth_token=cfg.get_auth_token() if hasattr(cfg, "get_auth_token") else getattr(cfg, "auth_token", None),
             )
-            return True
-                
-        except ImportError:
-            return False
+            self._openclaw_test_result = result
+            return result.passed
         except Exception as e:
             self.logger.debug("openclaw_connection_check_failed", error=str(e))
             return False
@@ -1094,19 +1090,42 @@ class InteractiveInstaller:
         openclaw_running = self._check_openclaw_connection()
         
         if not openclaw_running:
-            self.print_warning("OpenClaw is not available at the configured address")
-            print("  Start OpenClaw to run this test.\n")
-            
-            from bridge.config import get_config
-            config = get_config()
-            openclaw_url = f"{'https' if config.openclaw.secure else 'http'}://{config.openclaw.host}:{config.openclaw.port}"
-            print(f"  Expected URL: {openclaw_url}")
+            self.print_error("OpenClaw is NOT reachable at the configured address")
             print()
-            
+
+            # Show detailed diagnostic from the real connection test
+            r = self._openclaw_test_result
+            if r:
+                hw = r.as_hardware_result()
+                if hw.details:
+                    for line in hw.details.splitlines():
+                        print(f"  {line}")
+                print()
+
+            # Add to the diagnostic report so it appears in the summary fix guide
+            from installer.diagnostic import Issue
+            ctx = []
+            if r:
+                hw = r.as_hardware_result()
+                ctx = [l.strip() for l in (hw.details or "").splitlines() if l.strip()]
+            self._diag.add(Issue(
+                step="OpenClaw Integration Test",
+                title=r.as_hardware_result().message if r else "OpenClaw is not reachable",
+                context=ctx,
+                fix_steps=[
+                    "Start OpenClaw and make sure it is listening on the configured host:port.",
+                    "Check config: ~/.voice-bridge/config.yaml  (openclaw.host / openclaw.port)",
+                    "Verify with: curl http://<host>:<port>/v1/chat/completions",
+                    "If auth required: export OPENCLAW_GATEWAY_TOKEN=your_token",
+                    "Re-run installer: python -m installer",
+                ],
+                is_blocking=True,
+            ))
+
             if not self.prompt_yes_no("Continue without integration test?", default=True):
                 return False
-            
-            self.print_info("Integration test skipped - OpenClaw not available")
+
+            self.print_info("Integration test skipped — see fix guide in summary")
             self.prompt_continue()
             return True
         
@@ -1253,9 +1272,20 @@ class InteractiveInstaller:
     def _step_summary(self):
         """Step 8: Installation summary."""
         self.clear_screen()
-        self.print_header("✅ Installation Complete!")
-        
-        print("Voice Bridge is ready to use.\n")
+
+        if self._diag.has_issues:
+            if self._diag.has_blocking:
+                self.print_header("⚠️  Installation Complete — Action Required")
+                print("Voice Bridge is installed but will NOT work until the issues below are fixed.\n")
+            else:
+                self.print_header("⚠️  Installation Complete — Warnings")
+                print("Voice Bridge is installed. Review the issues below before starting.\n")
+
+            for line in self._diag.render().splitlines():
+                print(line)
+        else:
+            self.print_header("✅ Installation Complete!")
+            print("Voice Bridge is ready to use.\n")
         
         print("Next steps:")
         print("  1. Start Voice Bridge:")
