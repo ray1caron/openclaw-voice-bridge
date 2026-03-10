@@ -152,9 +152,9 @@ class WakeAcknowledgementConfig(BaseModel):
     """
     
     enabled: bool = Field(default=True, description="Enable wake word acknowledgement")
-    response_phrase: str = Field(default="Yes?", description="Phrase to speak as acknowledgement")
+    response_phrase: str = Field(default="Yes?", description="Phrase to speak as acknowledgement (only used if fallback_to_local_tts is true)")
     timeout_ms: int = Field(default=5000, ge=1000, le=10000, description="Timeout for OpenClaw response")
-    fallback_to_local_tts: bool = Field(default=True, description="Use local TTS if OpenClaw doesn't respond")
+    fallback_to_local_tts: bool = Field(default=False, description="Use local TTS if OpenClaw doesn't respond (disabled by default: if OpenClaw times out, proceed silently)")
 
 
 class WakeWordConfig(BaseModel):
