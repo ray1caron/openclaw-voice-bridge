@@ -417,7 +417,6 @@ class ConfigSummary:
             "Log Level": bridge_config.get("log_level", "INFO"),
             "Hot Reload": "Yes" if bridge_config.get("hot_reload", True) else "No",
             "Ack Enabled": "Yes" if ack_config.get("enabled", True) else "No",
-            "Ack Phrase": ack_config.get("response_phrase", "Yes?"),
             "Ack Timeout (ms)": ack_config.get("timeout_ms", 5000),
         }
 
@@ -546,9 +545,7 @@ class ConfigSummary:
                 "hot_reload": True,
                 "acknowledgement": {
                     "enabled": True,
-                    "response_phrase": "Yes?",
                     "timeout_ms": 5000,
-                    "fallback_to_local_tts": True,
                 },
             },
         }

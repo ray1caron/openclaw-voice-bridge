@@ -6,7 +6,7 @@ and audio output as numpy arrays.
 import io
 import wave
 from pathlib import Path
-from typing import Optional, Callable, Dict, List, Tuple
+from typing import Optional, Callable, List
 
 import structlog
 import numpy as np
@@ -28,16 +28,6 @@ except ImportError:
 # Default voice model path
 DEFAULT_VOICE_DIR = Path.home() / ".voice-bridge" / "voices"
 DEFAULT_VOICE = "en_US-lessac-medium"
-
-# Common short acknowledgement phrases that are pre-synthesized at startup
-# to eliminate inference latency on the wake-word response path.
-PRELOAD_PHRASES = [
-    "Yes?",
-    "I'm listening.",
-    "How can I help?",
-    "Go ahead.",
-    "Ready.",
-]
 
 
 class TTSState:
@@ -76,10 +66,6 @@ class TTSEngine:
         self._state = TTSState.IDLE
         self._available_voices: List[str] = []
         self._on_audio_generated: Optional[Callable[[np.ndarray], None]] = None
-
-        # Phrase cache: pre-synthesized audio for common ack phrases so the
-        # wake-word response path hits a buffer copy instead of NN inference.
-        self._phrase_cache: Dict[str, np.ndarray] = {}
 
         # Error capture for automatic bug tracking
         self.error_capture = ErrorCapture(component="tts", severity=BugSeverity.MEDIUM)
@@ -161,10 +147,6 @@ class TTSEngine:
                 model=str(model_path)
             )
 
-            # Pre-synthesize common ack phrases to eliminate inference latency
-            # on the wake-word response path.
-            self._warm_phrase_cache()
-
             return True
             
         except Exception as e:
@@ -218,22 +200,6 @@ class TTSEngine:
         
         return None
     
-    def _warm_phrase_cache(self) -> None:
-        """Pre-synthesize common ack phrases and store in cache.
-
-        Called once after the voice model is loaded. Synthesis happens
-        synchronously here (at startup) so subsequent speak() calls for
-        these phrases return instantly from the cache.
-        """
-        for phrase in PRELOAD_PHRASES:
-            try:
-                audio = self._synthesize(phrase)
-                self._phrase_cache[phrase.lower().strip()] = audio
-                logger.debug("tts_phrase_cached", phrase=phrase)
-            except Exception as e:
-                logger.warning("tts_phrase_cache_failed", phrase=phrase, error=str(e))
-        logger.info("tts_phrase_cache_warmed", count=len(self._phrase_cache))
-
     def _synthesize(self, text: str) -> np.ndarray:
         """Run Piper inference and return int16 audio. Internal helper."""
         from piper.config import SynthesisConfig
@@ -272,9 +238,6 @@ class TTSEngine:
         """
         Generate speech audio from text.
 
-        Checks the phrase cache first so common ack phrases (pre-synthesized
-        at startup) return immediately without NN inference overhead.
-
         Args:
             text: Text to synthesize
 
@@ -284,12 +247,6 @@ class TTSEngine:
         if not PIPER_AVAILABLE or self._voice is None:
             logger.warning("tts_not_available_returning_silence", text=text[:50])
             return self._mock_audio(text)
-
-        # Fast path: return pre-synthesized audio from cache
-        cache_key = text.lower().strip()
-        if cache_key in self._phrase_cache:
-            logger.debug("tts_cache_hit", text=text)
-            return self._phrase_cache[cache_key].copy()
 
         with self.error_capture.context(context="speak"):
             try:
