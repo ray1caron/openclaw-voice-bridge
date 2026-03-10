@@ -89,15 +89,13 @@ class WakeWordAckTester:
     def __init__(
         self,
         wake_word: str = None,
-        response_phrase: str = "Yes?",
         ack_timeout_ms: int = 5000,
         listen_timeout_ms: int = 15000,
     ):
         """Initialize the wake word acknowledgement tester.
-        
+
         Args:
             wake_word: The wake word phrase to detect (loads from config if None)
-            response_phrase: Expected response phrase from OpenClaw
             ack_timeout_ms: Timeout for OpenClaw response in milliseconds
             listen_timeout_ms: Timeout for wake word detection in milliseconds
         """
@@ -113,7 +111,6 @@ class WakeWordAckTester:
                 wake_word = "computer"  # Fallback default
         
         self.wake_word = wake_word
-        self.response_phrase = response_phrase
         self.ack_timeout_ms = ack_timeout_ms
         self.listen_timeout_ms = listen_timeout_ms
         
@@ -386,17 +383,19 @@ class WakeWordAckTester:
         on_response_received: Optional[Callable[[str], None]] = None,
         on_playing: Optional[Callable[[], None]] = None,
         on_timeout: Optional[Callable[[], None]] = None,
-        mock_openclaw_response: bool = False,
     ) -> WakeWordTestResult:
         """Test full wake word acknowledgement flow.
-        
+
         This test:
         1. Listens for wake word
         2. Sends acknowledgement to OpenClaw
-        3. Waits for OpenClaw response
-        4. Plays response via TTS
+        3. Waits for OpenClaw's spoken response
+        4. Plays the response via TTS
         5. Confirms flow completed successfully
-        
+
+        OpenClaw must be running. The test fails if OpenClaw does not respond —
+        no local fallback phrases are generated.
+
         Args:
             on_listening: Callback when listening starts
             on_speech_detected: Callback when speech is detected
@@ -405,8 +404,7 @@ class WakeWordAckTester:
             on_response_received: Callback when response received from OpenClaw
             on_playing: Callback when TTS playback starts
             on_timeout: Callback when timeout occurs
-            mock_openclaw_response: If True, use local TTS instead of waiting for OpenClaw
-            
+
         Returns:
             WakeWordTestResult with full test status
         """
@@ -437,15 +435,13 @@ class WakeWordAckTester:
             self._response_received = False
             self._received_phrase = None
             
-            # Try to connect to OpenClaw (unless mocking)
-            if not mock_openclaw_response:
-                openclaw_connected = self._try_connect_openclaw()
-                if not openclaw_connected:
-                    # Fall back to local TTS mode
-                    self.logger.info("openclaw_not_available_using_local_tts")
-                    mock_openclaw_response = True
-            else:
-                openclaw_connected = False
+            # OpenClaw is required — no local fallback
+            openclaw_connected = self._try_connect_openclaw()
+            if not openclaw_connected:
+                return WakeWordTestResult(
+                    status=WakeWordTestStatus.NO_OPENCLAW,
+                    message="OpenClaw is not running or not reachable. Start OpenClaw and retry.",
+                )
             
             # Audio capture parameters
             sample_rate = 16000
@@ -509,49 +505,47 @@ class WakeWordAckTester:
                     duration_ms=duration_ms,
                 )
             
-            # Send acknowledgement to OpenClaw
-            if openclaw_connected and self._openclaw_client:
-                # HTTP returns response directly, no need to wait
-                response = self._send_acknowledgement(detected_text)
-                if on_ack_sent:
-                    on_ack_sent()
-                
-                if response:
-                    self._received_phrase = response
-                    if on_response_received:
-                        on_response_received(response)
-                else:
-                    # Timeout waiting for response
-                    self._received_phrase = self.response_phrase  # Use configured phrase
-            
-            # Use configured phrase for mock mode
-            phrase_to_speak = self._received_phrase or self.response_phrase
-            
-            # Play response via TTS
+            # Send acknowledgement to OpenClaw and wait for its response
+            response = self._send_acknowledgement(detected_text)
+            if on_ack_sent:
+                on_ack_sent()
+
+            self._openclaw_client = None  # Clean up HTTP client reference
+
+            if not response:
+                duration_ms = int((time.time() - start_time) * 1000)
+                return WakeWordTestResult(
+                    status=WakeWordTestStatus.FAILED,
+                    message="OpenClaw did not respond to the wake word acknowledgement.",
+                    wake_word=self.wake_word,
+                    detected_text=detected_text,
+                    openclaw_responded=False,
+                    duration_ms=duration_ms,
+                )
+
+            self._received_phrase = response
+            if on_response_received:
+                on_response_received(response)
+
+            # Play the response OpenClaw sent
             if tts_available:
                 if on_playing:
                     on_playing()
-                
-                play_success = self._play_tts(phrase_to_speak)
+                play_success = self._play_tts(response)
                 if not play_success:
-                    # Fallback to system beep
                     self._play_tone(440, 0.2)
             else:
-                # Just play a beep if TTS not available
                 self._play_tone(440, 0.2)
-            
-            # HTTP client doesn't need disconnect - just clean up reference
-            self._openclaw_client = None
-            
+
             duration_ms = int((time.time() - start_time) * 1000)
-            
+
             return WakeWordTestResult(
                 status=WakeWordTestStatus.PASSED,
                 message="Wake word acknowledgement test passed!",
                 wake_word=self.wake_word,
                 detected_text=detected_text,
-                response_phrase=phrase_to_speak,
-                openclaw_responded=self._response_received,
+                response_phrase=response,
+                openclaw_responded=True,
                 duration_ms=duration_ms,
             )
                 
@@ -651,21 +645,16 @@ def test_wake_word_detection(
 
 def test_full_acknowledgement(
     wake_word: str = None,
-    response_phrase: str = "Yes?",
-    mock_openclaw: bool = False,
 ) -> WakeWordTestResult:
     """Convenience function to test full acknowledgement flow.
-    
+
+    OpenClaw must be running. Fails if OpenClaw does not respond.
+
     Args:
         wake_word: Wake word phrase to detect (loads from config if None)
-        response_phrase: Expected response phrase
-        mock_openclaw: Use local TTS instead of OpenClaw
-        
+
     Returns:
         Test result
     """
-    tester = WakeWordAckTester(
-        wake_word=wake_word,
-        response_phrase=response_phrase,
-    )
-    return tester.test_full_acknowledgement(mock_openclaw_response=mock_openclaw)
+    tester = WakeWordAckTester(wake_word=wake_word)
+    return tester.test_full_acknowledgement()

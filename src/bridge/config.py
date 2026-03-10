@@ -145,16 +145,15 @@ class PersistenceConfig(BaseModel):
 
 class WakeAcknowledgementConfig(BaseModel):
     """Wake word acknowledgement configuration.
-    
-    When enabled, sends an acknowledgement to OpenClaw after wake word detection,
-    allowing OpenClaw to respond with a voice_response containing the acknowledgement phrase.
-    Falls back to local TTS if OpenClaw doesn't respond within timeout.
+
+    When enabled, sends a wake word notification to OpenClaw after detection.
+    OpenClaw is solely responsible for responding with a voice_response.
+    If OpenClaw does not respond within timeout, the bridge proceeds silently
+    to listening state — no local fallback phrases are ever generated.
     """
-    
+
     enabled: bool = Field(default=True, description="Enable wake word acknowledgement")
-    response_phrase: str = Field(default="Yes?", description="Phrase to speak as acknowledgement")
-    timeout_ms: int = Field(default=5000, ge=1000, le=10000, description="Timeout for OpenClaw response")
-    fallback_to_local_tts: bool = Field(default=True, description="Use local TTS if OpenClaw doesn't respond")
+    timeout_ms: int = Field(default=5000, ge=1000, le=10000, description="Timeout waiting for OpenClaw acknowledgement response")
 
 
 class WakeWordConfig(BaseModel):

@@ -155,6 +155,10 @@ class VoiceOrchestrator:
         # Set when stop() is called so in-flight timer callbacks can bail early
         self._shutdown_event = threading.Event()
 
+        # Buffer for speech segments captured during wake_word_ack (user speaks
+        # their command before/during the "Yes?" acknowledgement audio).
+        self._buffered_speech_segment: Optional[object] = None
+
         # Event loop reference for safe async dispatch from audio threads.
         # Populated in start() once the loop is guaranteed to be running.
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -195,6 +199,7 @@ class VoiceOrchestrator:
     
     def _set_state(self, new_state: OrchestratorState):
         """Set orchestrator state and notify callbacks."""
+        buffered = None
         with self._state_lock:
             old_state = self._state
             if old_state != new_state:
@@ -205,13 +210,22 @@ class VoiceOrchestrator:
                     old=old_state.value,
                     new=new_state.value
                 )
-                
+
+                # Drain any speech segment buffered during wake_word_ack
+                if new_state == OrchestratorState.LISTENING and self._buffered_speech_segment is not None:
+                    buffered = self._buffered_speech_segment
+                    self._buffered_speech_segment = None
+
                 # Notify callbacks
                 for callback in self._state_callbacks:
                     try:
                         callback(old_state, new_state)
                     except Exception as e:
                         logger.error("state_callback_error", error=str(e))
+
+        if buffered is not None:
+            logger.info("replaying_buffered_speech_segment", duration_ms=buffered.duration_ms)
+            self._on_speech_segment(buffered)
     
     def add_state_callback(self, callback: Callable[[OrchestratorState, OrchestratorState], None]):
         """Add state change callback."""
@@ -394,7 +408,7 @@ class VoiceOrchestrator:
         Handle wake word acknowledgement flow.
         
         Sends acknowledgement to OpenClaw and waits for response.
-        Falls back to local TTS if OpenClaw doesn't respond in time.
+        If OpenClaw doesn't respond in time, proceeds silently to listening state.
         
         Args:
             wake_word_text: The detected wake word text
@@ -402,7 +416,6 @@ class VoiceOrchestrator:
         """
         logger.info(
             "handling_wake_word_ack",
-            response_phrase=ack_config.response_phrase,
             timeout_ms=ack_config.timeout_ms
         )
         
@@ -411,11 +424,10 @@ class VoiceOrchestrator:
         with self._wake_ack_lock:
             self._wake_ack_pending = True
         
-        # Start timeout timer for fallback
+        # Start timeout timer — if OpenClaw doesn't respond in time, proceed silently
         self._wake_ack_timer = threading.Timer(
             ack_config.timeout_ms / 1000.0,
             self._on_wake_ack_timeout,
-            args=[ack_config]
         )
         self._wake_ack_timer.start()
         
@@ -430,13 +442,13 @@ class VoiceOrchestrator:
                         self._on_wake_ack_response(response)
                     else:
                         logger.warning("empty_wake_ack_response")
-                        self._on_wake_ack_timeout(ack_config)
+                        self._on_wake_ack_timeout()
                 except OpenClawHTTPTimeoutError:
                     logger.warning("wake_ack_http_timeout")
-                    self._on_wake_ack_timeout(ack_config)
+                    self._on_wake_ack_timeout()
                 except OpenClawHTTPError as e:
                     logger.error("wake_ack_http_error", error=str(e))
-                    self._on_wake_ack_timeout(ack_config)
+                    self._on_wake_ack_timeout()
             
             self._dispatch_coroutine(send_http_ack())
         else:
@@ -446,23 +458,23 @@ class VoiceOrchestrator:
                     success = await self.websocket.send_wake_word_ack(wake_word_text)
                     if not success:
                         logger.warning("failed_to_send_wake_word_ack")
-                        self._on_wake_ack_timeout(ack_config)
+                        self._on_wake_ack_timeout()
                 else:
                     logger.warning("websocket_not_connected_for_wake_ack")
-                    self._on_wake_ack_timeout(ack_config)
+                    self._on_wake_ack_timeout()
 
             self._dispatch_coroutine(send_ack())
     
-    def _on_wake_ack_timeout(self, ack_config):
+    def _on_wake_ack_timeout(self):
         """
         Handle timeout waiting for wake word ack response from OpenClaw.
 
-        Falls back to local TTS if enabled, otherwise proceeds to listening state.
+        OpenClaw did not reply in time. Proceed silently to LISTENING so the
+        user can still speak their command. No local phrase is ever generated —
+        only OpenClaw may produce spoken acknowledgements.
+
         Guards against being called after stop() — the timer may fire in a
         thread that is already racing with shutdown.
-
-        Args:
-            ack_config: WakeAcknowledgementConfig instance
         """
         if self._shutdown_event.is_set():
             return
@@ -473,17 +485,14 @@ class VoiceOrchestrator:
                 return
             self._wake_ack_pending = False
 
-        logger.info("wake_ack_timeout_using_fallback")
+        logger.warning("wake_ack_timeout_no_response_from_openclaw")
 
         # Cancel timer if still running
         if self._wake_ack_timer:
             self._wake_ack_timer.cancel()
             self._wake_ack_timer = None
 
-        if ack_config.fallback_to_local_tts:
-            self._speak_acknowledgement(ack_config.response_phrase)
-        else:
-            self._set_state(OrchestratorState.LISTENING)
+        self._set_state(OrchestratorState.LISTENING)
 
     def _speak_acknowledgement(self, phrase: str):
         """
@@ -560,6 +569,13 @@ class VoiceOrchestrator:
         if not self._running:
             return
         
+        # Buffer speech captured during wake_word_ack so we can replay it once
+        # the acknowledgement finishes and we enter LISTENING state.
+        if self._state == OrchestratorState.WAKE_WORD_ACK:
+            logger.info("buffering_speech_segment_during_wake_ack", duration_ms=segment.duration_ms)
+            self._buffered_speech_segment = segment
+            return
+
         # Only process if in LISTENING state (after wake word)
         if self._state != OrchestratorState.LISTENING:
             return

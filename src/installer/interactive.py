@@ -550,7 +550,7 @@ class InteractiveInstaller:
         This test:
         1. Prompts user to say the wake word
         2. Detects the wake word
-        3. Sends acknowledgement to OpenClaw (or uses local TTS)
+        3. Sends acknowledgement to OpenClaw and plays back its response
         4. Plays the response
         5. Asks user to confirm they heard it
         """
@@ -562,24 +562,22 @@ class InteractiveInstaller:
             from bridge.config import get_config
             config = get_config()
             wake_word = config.wake_word.wake_word
-            response_phrase = config.bridge.acknowledgement.response_phrase
             ack_enabled = config.bridge.acknowledgement.enabled
             timeout_ms = config.bridge.acknowledgement.timeout_ms
         except Exception as e:
             self.logger.warning("config_load_failed", error=str(e))
             wake_word = "hey hal"
-            response_phrase = "Yes?"
             ack_enabled = True
             timeout_ms = 5000
-        
+
         if not ack_enabled:
             self.print_info("Wake word acknowledgement is disabled in configuration.")
             if not self.prompt_yes_no("Test anyway?", default=True):
                 return
-        
+
         print(f"\n  This test will verify your wake word detection and acknowledgement.")
         print(f"  Wake word: '{wake_word}'")
-        print(f"  Expected response: '{response_phrase}'")
+        print(f"  OpenClaw will provide the spoken response.")
         print()
         
         # Check if OpenClaw is running
@@ -587,14 +585,11 @@ class InteractiveInstaller:
         
         if openclaw_running:
             self.print_success("OpenClaw connection detected")
-            print("  The test will send an acknowledgement to OpenClaw and wait for its response.")
+            print("  The test will send the wake word to OpenClaw and play back its response.")
         else:
             self.print_warning("OpenClaw is not running or not connected")
-            print("  The test will use local TTS for the acknowledgement response.")
-            print("  (Start OpenClaw for the full experience)")
-            
-            if not self.prompt_yes_no("\n  Continue with local TTS?", default=True):
-                return
+            print("  This test requires OpenClaw to be running — start OpenClaw and retry.")
+            return
         
         # Import the wake word tester
         try:
@@ -607,7 +602,6 @@ class InteractiveInstaller:
         # Create tester
         tester = WakeWordAckTester(
             wake_word=wake_word,
-            response_phrase=response_phrase,
             ack_timeout_ms=timeout_ms,
             listen_timeout_ms=15000,  # 15 seconds to say wake word
         )
@@ -654,7 +648,6 @@ class InteractiveInstaller:
             on_response_received=on_response_received,
             on_playing=on_playing,
             on_timeout=on_timeout,
-            mock_openclaw_response=not openclaw_running,
         )
         
         print()  # Blank line after test output
@@ -664,13 +657,13 @@ class InteractiveInstaller:
             self.print_success("Wake word acknowledgement test passed!")
             print(f"     Wake word: '{result.wake_word}'")
             print(f"     Detected: '{result.detected_text}'")
-            print(f"     Response: '{result.response_phrase}'")
-            if result.openclaw_responded:
-                print("     OpenClaw responded: ✅")
-            
+            if result.response_phrase:
+                print(f"     OpenClaw response: '{result.response_phrase}'")
+            print("     OpenClaw responded: ✅")
+
             # Ask user to confirm they heard the response
             heard = self.prompt_yes_no(
-                f"\n  Did you hear '{result.response_phrase}'?",
+                "\n  Did you hear OpenClaw's response?",
                 default=True
             )
             
@@ -1457,15 +1450,36 @@ class InteractiveInstaller:
             if response and hasattr(response, 'content') and response.content:
                 print(f"\n{response.content}\n")
                 print("  " + "-" * 50)
-                
+
                 # Show metadata
                 if hasattr(response, 'model'):
                     print(f"\n  Model: {response.model}")
                 if hasattr(response, 'finish_reason'):
                     print(f"  Finish Reason: {response.finish_reason}")
-                
+
                 print(f"  Response Length: {len(response.content)} characters")
-                
+
+                # Speak the response via TTS so the user hears it
+                print("\n  🔊 Playing response via TTS...")
+                try:
+                    from bridge.tts import TTSEngine
+                    import sounddevice as sd
+                    tts = TTSEngine()
+                    if tts.initialize():
+                        audio = tts.speak(response.content)
+                        if audio is not None and len(audio) > 0:
+                            sd.play(audio, samplerate=22050)
+                            sd.wait()
+                            print("  ✅ TTS playback: OK")
+                        else:
+                            print("  ⚠️  TTS returned empty audio")
+                    else:
+                        print("  ⚠️  TTS engine not available (voice model missing?)")
+                except ImportError:
+                    print("  ⚠️  TTS/audio libraries not available — skipping playback")
+                except Exception as e:
+                    print(f"  ⚠️  TTS playback failed: {e}")
+
                 self.print_success("Integration test passed!")
                 print("  ✅ Wake word simulation: OK")
                 print("  ✅ Message sending: OK")
