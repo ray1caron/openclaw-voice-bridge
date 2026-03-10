@@ -279,18 +279,13 @@ class OpenClawHTTPClient:
             OpenClawHTTPTimeoutError: If request times out
             OpenClawHTTPConnectionError: If connection fails
         """
-        # Create a minimal prompt for wake word acknowledgement
-        system_msg = {
-            "role": "system",
-            "content": "You are a voice assistant. When you receive a wake word acknowledgement, respond with a brief, friendly confirmation like 'Yes?', 'I'm here', or 'How can I help?'. Keep responses very short - ideally one or two words."
-        }
-        
+        # Notify OpenClaw that the wake word was detected. No system prompt —
+        # OpenClaw's own persona and configuration determine the response.
         user_content = "Wake word detected."
         if wake_word:
             user_content = f"Wake word '{wake_word}' detected."
-        
+
         messages = [
-            system_msg,
             {"role": "user", "content": user_content}
         ]
         
