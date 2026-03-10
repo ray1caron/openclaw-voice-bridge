@@ -543,38 +543,29 @@ class Installer:
         self._emit_message("\n🔌 Step 6: Testing OpenClaw connection...")
 
         try:
-            from bridge.config import get_config
-            cfg = get_config().openclaw
-            endpoint = f"{cfg.host}:{cfg.port}"
-            self._emit_message(f"  Connecting to {endpoint} ...")
-
-            from installer.openclaw_test import test_openclaw_connection
-            timeout = min(cfg.timeout, 10.0)
-            result = test_openclaw_connection(cfg.host, cfg.port, timeout=timeout)
-            hw = result.as_hardware_result()
+            from installer.openclaw_test import run_openclaw_test
+            hw = run_openclaw_test()
             duration_ms = int((time.time() - start) * 1000)
 
-            if result.passed:
-                self._emit_message(f"  {hw}")
+            # Always print the details — they include URL, config path, api_mode, etc.
+            self._emit_message(f"  {hw}")
+            if hw.details:
+                for line in hw.details.splitlines():
+                    self._emit_message(f"     {line}")
+
+            if hw.passed:
                 return InstallResult(
                     step=InstallStep.OPENCLAW_CONNECTION,
                     success=True,
-                    message=f"OpenClaw reachable at {endpoint} ({result.latency_ms:.0f}ms)",
+                    message=hw.message,
                     duration_ms=duration_ms,
                 )
             else:
-                self._emit_message(f"  {hw}")
-                if hw.details:
-                    for line in hw.details.splitlines():
-                        self._emit_message(f"  {line}")
                 return InstallResult(
                     step=InstallStep.OPENCLAW_CONNECTION,
                     success=False,
-                    message=f"Cannot reach OpenClaw at {endpoint}",
-                    details=(
-                        f"The voice bridge will not work until OpenClaw is running.\n"
-                        f"  Start OpenClaw, then re-run: python -m installer"
-                    ),
+                    message=hw.message,
+                    details="The voice bridge will not work until OpenClaw is running.",
                     duration_ms=duration_ms,
                     can_continue=True,
                 )
