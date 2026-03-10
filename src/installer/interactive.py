@@ -696,6 +696,225 @@ class InteractiveInstaller:
             if result.error:
                 print(f"     Error: {result.error}")
     
+    def _probe_openclaw_verbose(self, host: str, port: int, auth_token: str | None) -> None:
+        """Run a verbose HTTP probe against OpenClaw and print curl-equivalent output.
+
+        Shows the user exactly what command would be used and what OpenClaw returns,
+        making it easy to diagnose slow/wrong responses before the timed test runs.
+        """
+        import json
+        import socket
+        import time
+        import urllib.error
+        import urllib.request
+
+        url = f"http://{host}:{port}/v1/chat/completions"
+        payload = json.dumps({
+            "model": "openclaw:main",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5,
+        })
+
+        # Print the equivalent curl command so the user can reproduce it manually
+        token_flag = (
+            f' \\\n    -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN"'
+            if auth_token else ""
+        )
+        print("  Equivalent curl command:")
+        print(f"    curl -v --max-time 10 \\")
+        print(f"      -H \"Content-Type: application/json\"{token_flag} \\")
+        print(f"      -d '{payload}' \\")
+        print(f"      {url}")
+        print()
+
+        # Run the probe with a generous 10-second timeout
+        headers = {"Content-Type": "application/json"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        req = urllib.request.Request(
+            url, data=payload.encode("utf-8"), headers=headers, method="POST"
+        )
+
+        print("  Probing OpenClaw (10s timeout)...")
+        start = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                elapsed = (time.time() - start) * 1000
+                body = resp.read(512).decode("utf-8", errors="replace")
+                print(f"  > HTTP {resp.status}  ({elapsed:.0f}ms)")
+                # Pretty-print JSON if possible
+                try:
+                    parsed = json.loads(body)
+                    choices = parsed.get("choices", [])
+                    preview = choices[0]["message"]["content"].strip() if choices else body[:120]
+                    print(f"  > Response: {preview[:120]}")
+                except Exception:
+                    print(f"  > Body: {body[:120]}")
+
+        except urllib.error.HTTPError as exc:
+            elapsed = (time.time() - start) * 1000
+            print(f"  > HTTP {exc.code} {exc.reason}  ({elapsed:.0f}ms)")
+            try:
+                body = exc.read(256).decode("utf-8", errors="replace")
+                if body.strip():
+                    print(f"  > Body: {body[:200]}")
+            except Exception:
+                pass
+            if exc.code in (401, 403):
+                self._show_auth_token_diagnostic()
+
+        except urllib.error.URLError as exc:
+            elapsed = (time.time() - start) * 1000
+            print(f"  > Failed: {exc.reason}  ({elapsed:.0f}ms)")
+
+        except (socket.timeout, OSError) as exc:
+            elapsed = (time.time() - start) * 1000
+            print(f"  > Failed: {exc}  ({elapsed:.0f}ms)")
+
+        print()
+
+    def _show_auth_token_diagnostic(self) -> None:
+        """Auto-discover OpenClaw auth token; fall back to manual entry if not found."""
+        import getpass
+        import os
+
+        host = self._openclaw_test_result.host if self._openclaw_test_result else "localhost"
+        port = self._openclaw_test_result.port if self._openclaw_test_result else 18789
+
+        # Find the voice-bridge config path for display / saving
+        config_path = None
+        for p in [os.path.expanduser("~/.voice-bridge/config.yaml"), "config.yaml"]:
+            if os.path.exists(p):
+                config_path = p
+                break
+
+        print()
+        print("  Searching for OpenClaw auth token automatically...")
+
+        # Reuse the bridge's own discovery logic — it searches all known locations
+        # and validates each token against OpenClaw before returning it.
+        discovered_token = None
+        discovered_source = None
+        try:
+            from bridge.config import get_config
+            cfg_obj = get_config()
+            # Temporarily point discovery at the live host/port
+            cfg_obj.openclaw.host = host
+            cfg_obj.openclaw.port = port
+            # Walk every source the bridge knows about
+            token_sources = [
+                ("OPENCLAW_GATEWAY_TOKEN env var",          lambda: os.environ.get("OPENCLAW_GATEWAY_TOKEN")),
+                ("OPENCLAW_TOKEN env var",                   lambda: os.environ.get("OPENCLAW_TOKEN")),
+                ("~/.openclaw/gateway_token",                lambda: cfg_obj._get_token_from_file(
+                                                                 __import__("pathlib").Path.home() / ".openclaw" / "gateway_token")),
+                ("~/.openclaw/.token",                       lambda: cfg_obj._get_token_from_file(
+                                                                 __import__("pathlib").Path.home() / ".openclaw" / ".token")),
+                ("~/.openclaw/openclaw.json",                lambda: cfg_obj._get_token_from_openclaw_json()),
+                ("~/.openclaw/config.yaml",                  lambda: cfg_obj._get_token_from_yaml(
+                                                                 __import__("pathlib").Path.home() / ".openclaw" / "config.yaml")),
+                ("~/.openclaw/workspace/openclaw.yaml",      lambda: cfg_obj._get_token_from_yaml(
+                                                                 __import__("pathlib").Path.home() / ".openclaw" / "workspace" / "openclaw.yaml")),
+            ]
+            openclaw_url = f"http://{host}:{port}"
+            for source_name, getter in token_sources:
+                try:
+                    token = getter()
+                    if not token:
+                        continue
+                    masked = token[:4] + "****" if len(token) > 4 else "****"
+                    print(f"  > Found token in {source_name} ({masked}) — validating...")
+                    if cfg_obj._validate_token(openclaw_url, token):
+                        discovered_token = token
+                        discovered_source = source_name
+                        print(f"  > Token is valid!")
+                        break
+                    else:
+                        print(f"  > Token rejected by OpenClaw (401)")
+                except Exception:
+                    continue
+        except Exception as exc:
+            print(f"  > Auto-discovery failed: {exc}")
+
+        if discovered_token:
+            # Save the working token to the voice-bridge config
+            print()
+            print(f"  Token found in: {discovered_source}")
+            print("  Saving to Voice Bridge config...")
+            self._save_token_to_config(discovered_token, config_path)
+            print()
+            print("  Re-probing OpenClaw with discovered token...")
+            self._probe_openclaw_verbose(host, port, discovered_token)
+            return
+
+        # Auto-discovery failed — tell the user where to look and offer manual entry
+        print("  No valid token found automatically.")
+        print()
+        print("  Expected token locations:")
+        print("    ~/.openclaw/gateway_token           (plain text, one line)")
+        print("    ~/.openclaw/.token                  (plain text, one line)")
+        print("    ~/.openclaw/openclaw.json           (gateway > auth > token)")
+        print("    ~/.openclaw/config.yaml             (gateway.auth_token)")
+        print("    ~/.openclaw/workspace/openclaw.yaml (openclaw.auth_token)")
+        print("    env: OPENCLAW_GATEWAY_TOKEN")
+        print()
+
+        if not self.prompt_yes_no("  Enter the auth token manually?", default=True):
+            print()
+            print("  Once you have the token:")
+            print(f"    Edit {config_path or '~/.voice-bridge/config.yaml'}")
+            print("    Set:  auth_token: 'your-token-here'")
+            return
+
+        print()
+        print("  Enter the OpenClaw auth token (input is hidden):")
+        try:
+            token = getpass.getpass("  Token: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("  Token entry cancelled.")
+            return
+
+        if not token:
+            print("  No token entered — skipping.")
+            return
+
+        self._save_token_to_config(token, config_path)
+        print()
+        print("  Re-probing OpenClaw with the new token...")
+        self._probe_openclaw_verbose(host, port, token)
+
+    def _save_token_to_config(self, token: str, config_path: str | None) -> None:
+        """Write auth token to the voice-bridge config file."""
+        import os
+        try:
+            from bridge.config import get_config
+            cfg_obj = get_config()
+            cfg_obj.openclaw.auth_token = token
+            cfg_obj.save()
+            saved_path = config_path or os.path.expanduser("~/.voice-bridge/config.yaml")
+            print(f"  Token saved to {saved_path}")
+        except Exception as exc:
+            # Fallback: edit the YAML line directly
+            target = config_path or os.path.expanduser("~/.voice-bridge/config.yaml")
+            try:
+                with open(target) as f:
+                    lines = f.readlines()
+                written = False
+                for i, line in enumerate(lines):
+                    if line.strip().startswith("auth_token"):
+                        lines[i] = f"  auth_token: '{token}'\n"
+                        written = True
+                        break
+                if not written:
+                    lines.append(f"  auth_token: '{token}'\n")
+                with open(target, "w") as f:
+                    f.writelines(lines)
+                print(f"  Token written to {target}")
+            except OSError as write_exc:
+                print(f"  Could not write config file: {write_exc}")
+                print(f"  Set manually:  export OPENCLAW_GATEWAY_TOKEN='{token}'")
+
     def _check_openclaw_connection(self) -> bool:
         """Check if OpenClaw is running and accessible.
 
@@ -1086,6 +1305,16 @@ class InteractiveInstaller:
         ws_passed = self._test_websocket_server()
         print()
         
+        # Verbose probe first — shows curl equivalent + raw response before the timed test
+        try:
+            from bridge.config import get_config
+            _cfg = get_config().openclaw
+            _token = _cfg.get_auth_token() if hasattr(_cfg, "get_auth_token") else getattr(_cfg, "auth_token", None)
+            print("  Testing OpenClaw HTTP endpoint...")
+            self._probe_openclaw_verbose(_cfg.host, _cfg.port, _token)
+        except Exception:
+            pass  # config unreadable — the connection test will surface the error
+
         # Check if OpenClaw is available
         openclaw_running = self._check_openclaw_connection()
         
