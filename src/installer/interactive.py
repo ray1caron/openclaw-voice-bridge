@@ -818,9 +818,17 @@ class InteractiveInstaller:
 
         # Offer to fix the token right now
         print()
+        print()
+        print("  Where to find your OpenClaw auth token:")
+        print("    1. ~/.openclaw/gateway_token           (plain text, one line)")
+        print("    2. ~/.openclaw/.token                  (plain text, one line)")
+        print("    3. ~/.openclaw/openclaw.json           (gateway > auth > token)")
+        print("    4. ~/.openclaw/config.yaml             (gateway.auth_token)")
+        print("    5. ~/.openclaw/workspace/openclaw.yaml (openclaw.auth_token)")
+        print()
         if not self.prompt_yes_no("  Would you like to enter the correct auth token now?", default=True):
             print()
-            print("  Fix manually:")
+            print("  Once you have the token, set it with:")
             print(f"    Edit {config_path or '~/.voice-bridge/config.yaml'}")
             print("    Set:  auth_token: 'your-token-here'")
             print("    Or:   export OPENCLAW_GATEWAY_TOKEN='your-token-here'")
