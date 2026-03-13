@@ -36,6 +36,40 @@ class InteractiveInstaller:
         from installer.diagnostic import DiagnosticReport
         self._diag = DiagnosticReport()
         self._openclaw_test_result = None  # set by _step_integration_test
+
+        from bridge.bug_tracker import BugTracker
+        self._bug_tracker = BugTracker.get_instance()
+
+    def _record_step(
+        self,
+        step: str,
+        success: bool,
+        message: str,
+        metadata: dict | None = None,
+    ) -> None:
+        """Record an interactive installer step outcome to the bug tracker DB.
+
+        Writes an install_step event to the events table so every test
+        result is preserved for later diagnosis.  Blocking failures are also
+        written to the bugs table so they surface in --show-bugs.
+        """
+        from bridge.bug_tracker import BugSeverity
+        md = {"success": success, "message": message}
+        if metadata:
+            md.update(metadata)
+        self._bug_tracker.record_event(
+            component="installer",
+            event_type="install_step",
+            trigger=step,
+            metadata=md,
+        )
+        if not success:
+            self._bug_tracker.capture_error(
+                error=Exception(message),
+                component="installer",
+                severity=BugSeverity.HIGH,
+                title=f"[{step}] {message}",
+            )
         
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -271,7 +305,10 @@ class InteractiveInstaller:
         if missing:
             self.print_error(f"Missing packages: {', '.join(missing)}")
             print(f"\n  Install with: pip install {' '.join(missing)}")
-            
+            self._record_step("dependencies", False,
+                              f"Missing packages: {', '.join(missing)}",
+                              {"missing": missing})
+
             if self.prompt_yes_no("Install missing packages now?", default=True):
                 import subprocess
                 cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages"] + missing
@@ -279,14 +316,19 @@ class InteractiveInstaller:
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode == 0:
                     self.print_success("Packages installed")
+                    self._record_step("dependencies", True, "Missing packages installed successfully",
+                                      {"packages": missing})
                 else:
                     self.print_error("Failed to install packages")
                     print(result.stderr)
+                    self._record_step("dependencies", False, "pip install failed",
+                                      {"packages": missing, "stderr": result.stderr[:500]})
                     return False
             else:
                 self.print_warning("Some features may not work without these packages")
         else:
             self.print_success("All dependencies satisfied")
+            self._record_step("dependencies", True, "All dependencies satisfied")
         
         self.prompt_continue()
         return True
@@ -302,18 +344,21 @@ class InteractiveInstaller:
         if not tester.audio_available:
             self.print_warning("Audio libraries not available")
             print("  Install with: pip install sounddevice numpy")
+            self._record_step("hardware_check", False, "Audio libraries (sounddevice/numpy) not available")
             if not self.prompt_yes_no("Continue without audio testing?", default=False):
                 return False
             self.prompt_continue()
             return True
-        
+
         # Discover devices
         print("  Discovering audio devices...\n")
         discovery = tester.test_device_discovery()
         print(f"     {discovery}\n")
-        
+
         if not discovery.passed:
             self.print_error("No audio devices found!")
+            self._record_step("hardware_check", False, "No audio devices found",
+                              {"detail": discovery.message})
             if not self.prompt_yes_no("Continue anyway?", default=False):
                 return False
         
@@ -351,9 +396,11 @@ class InteractiveInstaller:
         if result.failed:
             self.print_error("Microphone test failed")
             print(f"     {result.message}")
+            self._record_step("microphone_test", False, f"Microphone recording failed: {result.message}")
             return
-        
+
         self.print_success("Microphone recording successful!")
+        self._record_step("microphone_test", True, "Microphone recording successful")
         
         # Ask if they want to hear playback
         if self.prompt_yes_no("Play back recording through speakers?", default=True):
@@ -451,13 +498,16 @@ class InteractiveInstaller:
             else:
                 self.print_warning("No speech detected in recording")
                 print("     Try speaking louder or closer to the microphone")
-                
+                self._record_step("stt_test", False, "STT: no speech detected in recording")
+
         except ImportError:
             self.print_warning("STT module not available")
             print("     Install with: pip install faster-whisper")
+            self._record_step("stt_test", False, "STT module not available (faster-whisper not installed)")
         except Exception as e:
             self.print_error(f"STT test failed: {e}")
             self.logger.error("stt_test_failed", error=str(e))
+            self._record_step("stt_test", False, f"STT test exception: {e}")
     
     def _test_tts(self, text: str, tester):
         """Test text-to-speech with the transcribed text."""
@@ -491,6 +541,7 @@ class InteractiveInstaller:
             
             if audio_data is None or len(audio_data) == 0:
                 self.print_warning("No audio generated")
+                self._record_step("tts_test", False, "TTS produced no audio output")
                 return
             
             print(f"  Generated in {elapsed:.2f}s")
@@ -506,18 +557,22 @@ class InteractiveInstaller:
             heard = self.prompt_yes_no("\n  Did you hear the speech?", default=True)
             if heard:
                 self.print_success("Text-to-speech working!")
+                self._record_step("tts_test", True, "TTS confirmed working by user")
             else:
                 self.print_warning("Check your speaker volume and connections")
+                self._record_step("tts_test", False, "TTS played but user did not hear output")
                 if self.prompt_yes_no("Try playing again?", default=False):
                     sd.play(audio_data, samplerate=22050)
                     sd.wait()
-            
+
         except ImportError:
             self.print_warning("TTS module not available")
             print("     Install with: pip install piper-tts")
+            self._record_step("tts_test", False, "TTS module not available (piper-tts not installed)")
         except Exception as e:
             self.print_error(f"TTS test failed: {e}")
             self.logger.error("tts_test_failed", error=str(e))
+            self._record_step("tts_test", False, f"TTS test exception: {e}")
     
     def _test_speakers(self, tester):
         """Interactive speaker test."""
@@ -543,6 +598,7 @@ class InteractiveInstaller:
             else:
                 self.print_error("Speaker test failed")
                 print(f"     {result.message}")
+                self._record_step("speaker_test", False, f"Speaker playback test failed: {result.message}")
     
     def _test_wake_word_acknowledgement(self):
         """Test wake word detection and acknowledgement flow.
@@ -589,14 +645,19 @@ class InteractiveInstaller:
         else:
             self.print_warning("OpenClaw is not running or not connected")
             print("  This test requires OpenClaw to be running — start OpenClaw and retry.")
+            self._record_step("wake_word_ack_test", False,
+                              "OpenClaw not reachable — wake word ack test skipped",
+                              {"wake_word": wake_word})
             return
-        
+
         # Import the wake word tester
         try:
             from installer.wake_word_test import WakeWordAckTester, WakeWordTestStatus
         except ImportError as e:
             self.print_error("Wake word test module not available")
             print(f"     Error: {e}")
+            self._record_step("wake_word_ack_test", False,
+                              f"wake_word_test module not importable: {e}")
             return
         
         # Create tester
@@ -660,34 +721,48 @@ class InteractiveInstaller:
             if result.response_phrase:
                 print(f"     OpenClaw response: '{result.response_phrase}'")
             print("     OpenClaw responded: ✅")
+            self._record_step("wake_word_ack_test", True, "Wake word ack test passed",
+                              {"wake_word": result.wake_word,
+                               "detected_text": result.detected_text,
+                               "response_phrase": result.response_phrase})
 
             # Ask user to confirm they heard the response
             heard = self.prompt_yes_no(
                 "\n  Did you hear OpenClaw's response?",
                 default=True
             )
-            
+
             if heard:
                 self.print_success("Wake word acknowledgement is working! 🎉")
             # Troubleshooting removed per user request
-                
+
         elif result.status == WakeWordTestStatus.TIMEOUT:
             self.print_error("Wake word not detected within timeout")
             print(f"     Make sure you said '{wake_word}' clearly")
+            self._record_step("wake_word_ack_test", False,
+                              f"Wake word '{wake_word}' not detected within timeout",
+                              {"wake_word": wake_word})
             print()
-            
+
             if self.prompt_yes_no("Try again?", default=True):
                 self._test_wake_word_acknowledgement()
             return
-            
+
         elif result.status == WakeWordTestStatus.SKIPPED:
             self.print_warning("Test skipped")
             print(f"     {result.message}")
-            
+            self._record_step("wake_word_ack_test", False,
+                              f"Wake word ack test skipped: {result.message}",
+                              {"wake_word": wake_word})
+
         else:
             self.print_error(f"Test failed: {result.message}")
             if result.error:
                 print(f"     Error: {result.error}")
+            self._record_step("wake_word_ack_test", False,
+                              f"Wake word ack test failed: {result.message}",
+                              {"wake_word": wake_word,
+                               "error": str(result.error) if result.error else None})
     
     def _probe_openclaw_verbose(self, host: str, port: int, auth_token: str | None) -> bool:
         """Run a verbose HTTP probe against OpenClaw and print curl-equivalent output.
@@ -1337,6 +1412,13 @@ class InteractiveInstaller:
                         print(f"  {line}")
                 print()
 
+            failure_msg = r.as_hardware_result().message if r else "OpenClaw is not reachable"
+            self._record_step("integration_test", False, failure_msg,
+                              {"tcp_reachable": r.tcp_reachable if r else False,
+                               "http_ok": r.http_ok if r else False,
+                               "http_status": r.http_status if r else None,
+                               "tcp_error": r.tcp_error if r else None})
+
             # Add to the diagnostic report so it appears in the summary fix guide
             from installer.diagnostic import Issue
             ctx = []
@@ -1365,22 +1447,24 @@ class InteractiveInstaller:
             return True
         
         self.print_success("OpenClaw connection detected")
-        
+        self._record_step("integration_test", True, "OpenClaw connection verified")
+
         # Ask if user wants to run the integration test
         print()
         if not self.prompt_yes_no("Run integration test?", default=True):
             self.print_info("Integration test skipped")
             self.prompt_continue()
             return True
-        
+
         print("\n  Running integration test...\n")
-        
+
         # Run the test
         try:
             self._run_integration_test()
         except Exception as e:
             self.print_error(f"Integration test failed: {e}")
             self.logger.error("integration_test_failed", error=str(e))
+            self._record_step("integration_test", False, f"Integration test exception: {e}")
             self.prompt_continue()
             return False
         
