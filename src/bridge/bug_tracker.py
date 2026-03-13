@@ -321,7 +321,19 @@ class BugTracker:
         })
 
     def _event_writer_loop(self) -> None:
-        """Background thread: drain the event queue and write to SQLite."""
+        """Background thread: drain the event queue and write to SQLite.
+
+        Calls _init_db() once at startup so that databases created by older
+        versions of the code (which lack the events table) are migrated before
+        the first INSERT is attempted.
+        """
+        # Ensure schema is current — handles DBs created before the events
+        # table was added without requiring a separate migration step.
+        try:
+            self._init_db()
+        except Exception as e:
+            logger.warning("event_writer_schema_init_failed", error=str(e))
+
         while True:
             try:
                 event = self._event_queue.get()
@@ -529,19 +541,24 @@ class BugTracker:
             row = cursor.fetchone()
 
             if row:
+                d = dict(row)
+                try:
+                    system_state = json.loads(d.get("system_state") or "{}")
+                except (json.JSONDecodeError, ValueError):
+                    system_state = {}
                 return BugReport(
-                    id=row["id"],
-                    timestamp=row["timestamp"],
-                    severity=row["severity"],
-                    component=row["component"],
-                    title=row["title"],
-                    description=row["description"],
-                    stack_trace=row["stack_trace"],
-                    system_state=json.loads(row["system_state"]),
-                    user_context=row["user_context"],
-                    status=row["status"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
+                    id=d["id"],
+                    timestamp=d["timestamp"],
+                    severity=d["severity"],
+                    component=d["component"],
+                    title=d["title"],
+                    description=d["description"],
+                    stack_trace=d.get("stack_trace"),
+                    system_state=system_state,
+                    user_context=d.get("user_context"),
+                    status=d["status"],
+                    created_at=d["created_at"],
+                    updated_at=d["updated_at"],
                 )
             return None
 
@@ -576,19 +593,24 @@ class BugTracker:
 
             bugs = []
             for row in rows:
+                d = dict(row)
+                try:
+                    system_state = json.loads(d.get("system_state") or "{}")
+                except (json.JSONDecodeError, ValueError):
+                    system_state = {}
                 bugs.append(BugReport(
-                    id=row["id"],
-                    timestamp=row["timestamp"],
-                    severity=row["severity"],
-                    component=row["component"],
-                    title=row["title"],
-                    description=row["description"],
-                    stack_trace=row["stack_trace"],
-                    system_state=json.loads(row["system_state"]),
-                    user_context=row["user_context"],
-                    status=row["status"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
+                    id=d["id"],
+                    timestamp=d["timestamp"],
+                    severity=d["severity"],
+                    component=d["component"],
+                    title=d["title"],
+                    description=d["description"],
+                    stack_trace=d.get("stack_trace"),
+                    system_state=system_state,
+                    user_context=d.get("user_context"),
+                    status=d["status"],
+                    created_at=d["created_at"],
+                    updated_at=d["updated_at"],
                 ))
             return bugs
 
