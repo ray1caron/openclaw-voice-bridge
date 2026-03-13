@@ -8,6 +8,7 @@ Stores locally in SQLite for privacy and offline use.
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import sys
 import threading
@@ -159,6 +160,17 @@ class BugTracker:
 
         BugTracker._start_time = datetime.now()
 
+        # Background writer for non-blocking event recording.
+        # Events are queued and flushed by a daemon thread so that
+        # hot paths (state transitions, audio callbacks) never block on DB I/O.
+        self._event_queue: queue.Queue = queue.Queue()
+        self._event_writer_thread = threading.Thread(
+            target=self._event_writer_loop,
+            name="bug-tracker-event-writer",
+            daemon=True,
+        )
+        self._event_writer_thread.start()
+
         logger.info(
             "bug_tracker_initialized",
             db_path=str(self.db_path),
@@ -172,8 +184,11 @@ class BugTracker:
         return cls._instance
 
     def _init_db(self) -> None:
-        """Initialize SQLite database."""
+        """Initialize SQLite database schema (bugs + events tables)."""
         with sqlite3.connect(self.db_path) as conn:
+            # Enable WAL for better concurrency and crash safety
+            conn.execute("PRAGMA journal_mode=WAL")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bugs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,11 +206,36 @@ class BugTracker:
                 )
             """)
 
-            # Create indexes
+            # Diagnostic events table — records state transitions, timeouts,
+            # interactive mode lifecycle, and HTTP request outcomes so that
+            # lockups and unexpected behaviour can be replayed from the DB
+            # rather than guessed from logs.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    component TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT,
+                    duration_ms REAL,
+                    trigger TEXT,
+                    metadata TEXT,
+                    session_uptime_ms REAL
+                )
+            """)
+
+            # Indexes on bugs
             conn.execute("CREATE INDEX IF NOT EXISTS idx_severity ON bugs(severity)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON bugs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_component ON bugs(component)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON bugs(timestamp)")
+
+            # Indexes on events
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_component ON events(component)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)")
+
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -219,6 +259,147 @@ class BugTracker:
             )
             row = cursor.fetchone()
             return row[0] if row else None
+
+    # ------------------------------------------------------------------
+    # Diagnostic event recording
+    # ------------------------------------------------------------------
+
+    def record_event(
+        self,
+        component: str,
+        event_type: str,
+        from_state: Optional[str] = None,
+        to_state: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        trigger: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Record a diagnostic event to the events table.
+
+        Non-blocking: the event is queued and written by a background thread
+        so that hot paths (state transitions, audio callbacks) are never
+        delayed by database I/O.
+
+        Useful event_type values:
+          state_change        - orchestrator state machine transition
+          interactive_enter   - entered interactive conversation mode
+          interactive_exit    - exited interactive mode (see trigger for reason)
+          idle_timeout        - idle timer fired
+          cancel_phrase       - user said a cancel phrase
+          ack_timeout         - wake word ack timed out
+          http_request        - HTTP request to OpenClaw
+          http_timeout        - HTTP request timed out
+          stt_complete        - speech-to-text finished
+          tts_complete        - text-to-speech playback finished
+          barge_in            - user interrupted TTS playback
+          audio_error         - audio pipeline error
+
+        Args:
+            component:   Source component (e.g. "orchestrator", "http_client")
+            event_type:  Category of event (see above)
+            from_state:  Previous state, if applicable
+            to_state:    New state, if applicable
+            duration_ms: Time spent in previous state / request duration
+            trigger:     What caused the event (e.g. "wake_word", "idle_timeout")
+            metadata:    Arbitrary JSON-serialisable dict with extra context
+        """
+        uptime_ms: Optional[float] = None
+        if BugTracker._start_time:
+            uptime_ms = (datetime.now() - BugTracker._start_time).total_seconds() * 1000
+
+        self._event_queue.put({
+            "timestamp": datetime.now().isoformat(),
+            "component": component,
+            "event_type": event_type,
+            "from_state": from_state,
+            "to_state": to_state,
+            "duration_ms": duration_ms,
+            "trigger": trigger,
+            "metadata": json.dumps(metadata) if metadata else None,
+            "session_uptime_ms": uptime_ms,
+        })
+
+    def _event_writer_loop(self) -> None:
+        """Background thread: drain the event queue and write to SQLite."""
+        while True:
+            try:
+                event = self._event_queue.get()
+                if event is None:
+                    break  # Sentinel: shut down
+
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        """INSERT INTO events
+                           (timestamp, component, event_type, from_state, to_state,
+                            duration_ms, trigger, metadata, session_uptime_ms)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            event["timestamp"],
+                            event["component"],
+                            event["event_type"],
+                            event["from_state"],
+                            event["to_state"],
+                            event["duration_ms"],
+                            event["trigger"],
+                            event["metadata"],
+                            event["session_uptime_ms"],
+                        ),
+                    )
+                    conn.commit()
+            except Exception as e:
+                # Never crash the writer thread — just log and continue
+                logger.debug("event_writer_error", error=str(e))
+
+    def get_recent_events(
+        self,
+        component: Optional[str] = None,
+        event_type: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return recent diagnostic events for debugging.
+
+        Args:
+            component:  Filter by component name (None = all)
+            event_type: Filter by event type (None = all)
+            limit:      Maximum rows to return (most-recent first)
+
+        Returns:
+            List of event dicts with keys matching the events table columns.
+        """
+        query = "SELECT * FROM events WHERE 1=1"
+        params: list = []
+
+        if component:
+            query += " AND component = ?"
+            params.append(component)
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(query, params)
+            rows = cursor.fetchall()
+
+        return [dict(row) for row in rows]
+
+    def get_state_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Return recent orchestrator state transitions for lockup diagnosis.
+
+        Convenience wrapper around get_recent_events() focused on
+        state_change events so callers don't have to specify filters.
+        """
+        return self.get_recent_events(
+            component="orchestrator",
+            event_type="state_change",
+            limit=limit,
+        )
 
     # ------------------------------------------------------------------
     # Core capture
