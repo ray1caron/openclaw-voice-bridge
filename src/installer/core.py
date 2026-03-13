@@ -140,6 +140,7 @@ class Installer:
         # Step 1: Detection
         result = self._run_detection()
         self.results.append(result)
+        self._record_step_result(result)
         all_success = all_success and result.success
         for issue in result.issues:
             self._diag.add(issue)
@@ -151,6 +152,7 @@ class Installer:
         if result.warnings or "running" in result.message.lower():
             result = self._run_cleanup()
             self.results.append(result)
+            self._record_step_result(result)
             all_success = all_success and result.success
             for issue in result.issues:
                 self._diag.add(issue)
@@ -158,6 +160,7 @@ class Installer:
         # Step 3: Hardware Check
         result = self._run_hardware_check()
         self.results.append(result)
+        self._record_step_result(result)
         all_success = all_success and result.success
         for issue in result.issues:
             self._diag.add(issue)
@@ -168,6 +171,7 @@ class Installer:
         # Step 4: Dependencies
         result = self._run_dependencies()
         self.results.append(result)
+        self._record_step_result(result)
         all_success = all_success and result.success
         for issue in result.issues:
             self._diag.add(issue)
@@ -178,6 +182,7 @@ class Installer:
         # Step 5: Configuration
         result = self._run_configuration()
         self.results.append(result)
+        self._record_step_result(result)
         all_success = all_success and result.success
         for issue in result.issues:
             self._diag.add(issue)
@@ -185,6 +190,7 @@ class Installer:
         # Step 6: OpenClaw Connection
         result = self._run_openclaw_check()
         self.results.append(result)
+        self._record_step_result(result)
         all_success = all_success and result.success
         for issue in result.issues:
             self._diag.add(issue)
@@ -192,6 +198,7 @@ class Installer:
         # Step 7: Bug Check
         result = self._run_bug_check()
         self.results.append(result)
+        self._record_step_result(result)
         all_success = all_success and result.success
         for issue in result.issues:
             self._diag.add(issue)
@@ -199,6 +206,7 @@ class Installer:
         # Step 8: Final
         result = self._run_final()
         self.results.append(result)
+        self._record_step_result(result)
 
         return all_success
     
@@ -324,6 +332,12 @@ class Installer:
                 
         except Exception as e:
             self.logger.error("Cleanup failed", error=str(e))
+            self.bug_tracker.capture_error(
+                error=e,
+                component="installer",
+                severity=BugSeverity.MEDIUM,
+                title="Step failed: cleanup",
+            )
             return InstallResult(
                 step=InstallStep.CLEANUP,
                 success=False,
@@ -692,6 +706,12 @@ class Installer:
 
         except Exception as e:
             self.logger.error("Configuration check failed", error=str(e))
+            self.bug_tracker.capture_error(
+                error=e,
+                component="installer",
+                severity=BugSeverity.MEDIUM,
+                title="Step failed: configuration",
+            )
             from installer.diagnostic import Issue
             return InstallResult(
                 step=InstallStep.CONFIGURATION,
@@ -756,6 +776,12 @@ class Installer:
                 is_blocking=True,
             ))
 
+            self.bug_tracker.capture_error(
+                error=Exception(hw.message),
+                component="installer",
+                severity=BugSeverity.HIGH,
+                title=f"Step failed: openclaw_connection - {hw.message}",
+            )
             return InstallResult(
                 step=InstallStep.OPENCLAW_CONNECTION,
                 success=False,
@@ -767,6 +793,12 @@ class Installer:
 
         except Exception as e:
             self.logger.error("OpenClaw connection check failed", error=str(e))
+            self.bug_tracker.capture_error(
+                error=e,
+                component="installer",
+                severity=BugSeverity.HIGH,
+                title="Step failed: openclaw_connection crashed",
+            )
             issues.append(Issue(
                 step="OpenClaw Connection",
                 title=f"OpenClaw check crashed: {type(e).__name__}",
@@ -910,6 +942,45 @@ class Installer:
             duration_ms=duration_ms,
         )
     
+    def _record_step_result(self, result: InstallResult) -> None:
+        """Record every install step outcome to the diagnostic events and bugs tables.
+
+        Called after every step so that a complete audit trail is always
+        available in the database — regardless of which step failed or why.
+        """
+        metadata: dict = {
+            "success": result.success,
+            "message": result.message,
+            "can_continue": result.can_continue,
+        }
+        if result.warnings:
+            metadata["warnings"] = result.warnings
+        if result.issues:
+            metadata["issues"] = [
+                {"title": i.title, "blocking": i.is_blocking}
+                for i in result.issues
+            ]
+
+        self.bug_tracker.record_event(
+            component="installer",
+            event_type="install_step",
+            trigger=result.step.value,
+            duration_ms=float(result.duration_ms) if result.duration_ms else None,
+            metadata=metadata,
+        )
+
+        # For blocking failures, also write to the bugs table so they
+        # appear in `python -m installer --show-bugs` on the next run.
+        if not result.success:
+            for issue in (result.issues or []):
+                if issue.is_blocking:
+                    self.bug_tracker.capture_error(
+                        error=Exception(issue.title),
+                        component="installer",
+                        severity=BugSeverity.HIGH,
+                        title=f"[{result.step.value}] {issue.title}",
+                    )
+
     @property
     def success(self) -> bool:
         """Check if installation was successful."""
