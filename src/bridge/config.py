@@ -165,6 +165,34 @@ class WakeWordConfig(BaseModel):
     refractory_seconds: float = Field(default=2.0, ge=0.0, le=10.0, description="Cooldown period after detection")
 
 
+class InteractiveConfig(BaseModel):
+    """Interactive conversation mode configuration.
+
+    After the wake word is acknowledged, the bridge enters an interactive
+    session where the user can speak and OpenClaw responds in a continuous
+    loop without requiring the wake word again.
+
+    The session ends when:
+    - The user says one of the configured cancel phrases
+    - No speech is detected for idle_timeout_seconds
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enter interactive mode after wake word acknowledgement"
+    )
+    idle_timeout_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=300.0,
+        description="Exit interactive mode after this many seconds without user speech"
+    )
+    cancel_phrases: list[str] = Field(
+        default=["stop", "cancel", "nevermind", "never mind", "exit", "goodbye", "bye"],
+        description="Phrases that exit interactive mode when spoken by the user"
+    )
+
+
 class BridgeConfig(BaseModel):
     """Bridge behavior configuration."""
 
@@ -177,6 +205,12 @@ class BridgeConfig(BaseModel):
     acknowledgement: WakeAcknowledgementConfig = Field(
         default_factory=WakeAcknowledgementConfig,
         description="Wake word acknowledgement settings"
+    )
+
+    # Interactive conversation mode
+    interactive: InteractiveConfig = Field(
+        default_factory=InteractiveConfig,
+        description="Interactive conversation mode settings"
     )
 
 

@@ -39,7 +39,8 @@ class OrchestratorState(enum.Enum):
     IDLE = "idle"                    # Waiting for wake word
     LISTENING_FOR_WAKE_WORD = "listening_for_wake_word"  # Active VAD
     WAKE_WORD_ACK = "wake_word_ack"  # Waiting for ack response from OpenClaw
-    LISTENING = "listening"          # Capturing speech after wake word
+    LISTENING = "listening"          # Capturing speech after wake word (single-turn)
+    INTERACTIVE = "interactive"      # Active conversation session; listening for follow-up
     PROCESSING = "processing"        # Sending to OpenClaw
     SPEAKING = "speaking"            # Playing TTS response
     ERROR = "error"                  # Error state
@@ -155,6 +156,11 @@ class VoiceOrchestrator:
         # Set when stop() is called so in-flight timer callbacks can bail early
         self._shutdown_event = threading.Event()
 
+        # Interactive mode
+        self._interactive_mode = False
+        self._idle_timer: Optional[threading.Timer] = None
+        self._idle_timer_lock = threading.Lock()
+
         # Buffer for speech segments captured during wake_word_ack (user speaks
         # their command before/during the "Yes?" acknowledgement audio).
         self._buffered_speech_segment: Optional[object] = None
@@ -212,7 +218,7 @@ class VoiceOrchestrator:
                 )
 
                 # Drain any speech segment buffered during wake_word_ack
-                if new_state == OrchestratorState.LISTENING and self._buffered_speech_segment is not None:
+                if new_state in (OrchestratorState.LISTENING, OrchestratorState.INTERACTIVE) and self._buffered_speech_segment is not None:
                     buffered = self._buffered_speech_segment
                     self._buffered_speech_segment = None
 
@@ -309,6 +315,10 @@ class VoiceOrchestrator:
                     self._wake_ack_timer.cancel()
                     self._wake_ack_timer = None
 
+            # Cancel interactive idle timer if running
+            self._cancel_idle_timer()
+            self._interactive_mode = False
+
             # Stop components
             self.wake_word_detector.stop()
             self.audio_pipeline.stop()
@@ -393,8 +403,8 @@ class VoiceOrchestrator:
         if ack_config.enabled:
             self._handle_wake_word_ack(text, ack_config)
         else:
-            # Skip acknowledgement, go directly to listening
-            self._set_state(OrchestratorState.LISTENING)
+            # Skip acknowledgement, enter interactive mode directly
+            self._enter_interactive_mode()
         
         # Notify any registered listeners
         if hasattr(self, 'on_wake_word'):
@@ -492,7 +502,83 @@ class VoiceOrchestrator:
             self._wake_ack_timer.cancel()
             self._wake_ack_timer = None
 
-        self._set_state(OrchestratorState.LISTENING)
+        self._enter_interactive_mode()
+
+    # =========================================================================
+    # Interactive mode
+    # =========================================================================
+
+    def _enter_interactive_mode(self):
+        """
+        Enter interactive conversation mode.
+
+        The bridge stays in this mode, listening for user speech and
+        responding via OpenClaw, until the user cancels or the idle
+        timer expires.
+
+        If interactive mode is disabled in config, falls back to
+        LISTENING_FOR_WAKE_WORD (single-turn behaviour).
+        """
+        if self._shutdown_event.is_set():
+            return
+
+        interactive_cfg = self.config.bridge.interactive
+        if not interactive_cfg.enabled:
+            self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
+            return
+
+        logger.info(
+            "entering_interactive_mode",
+            idle_timeout_seconds=interactive_cfg.idle_timeout_seconds,
+            cancel_phrases=interactive_cfg.cancel_phrases,
+        )
+        self._interactive_mode = True
+        self._set_state(OrchestratorState.INTERACTIVE)
+        self._reset_idle_timer()
+
+    def _exit_interactive_mode(self, reason: str = "unknown"):
+        """
+        Exit interactive mode and return to wake word detection.
+
+        Args:
+            reason: Human-readable reason for exiting (for logging).
+        """
+        if not self._interactive_mode:
+            return
+        logger.info("exiting_interactive_mode", reason=reason)
+        self._interactive_mode = False
+        self._cancel_idle_timer()
+        if self._running:
+            self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
+
+    def _reset_idle_timer(self):
+        """Restart the idle timeout countdown."""
+        self._cancel_idle_timer()
+        idle_secs = self.config.bridge.interactive.idle_timeout_seconds
+        with self._idle_timer_lock:
+            self._idle_timer = threading.Timer(idle_secs, self._on_idle_timeout)
+            self._idle_timer.daemon = True
+            self._idle_timer.start()
+
+    def _cancel_idle_timer(self):
+        """Cancel the idle timer without exiting interactive mode."""
+        with self._idle_timer_lock:
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+
+    def _on_idle_timeout(self):
+        """
+        Called when the idle timer fires.
+
+        If we are still in interactive mode (user hasn't spoken for
+        idle_timeout_seconds), exit back to wake word detection.
+        """
+        if self._shutdown_event.is_set():
+            return
+        if self._interactive_mode:
+            logger.info("interactive_mode_idle_timeout")
+            self._exit_interactive_mode("idle_timeout")
 
     def _speak_acknowledgement(self, phrase: str):
         """
@@ -513,17 +599,17 @@ class VoiceOrchestrator:
                 if len(audio_data) > 0:
                     self.audio_pipeline.play_audio(audio_data, sample_rate=22050)
                     self._set_state(OrchestratorState.SPEAKING)
-                    # Transition to listening after audio starts (pipeline
-                    # state callback will also handle this on playback end)
-                    await asyncio.sleep(0.5)
+                    # Wait for audio to finish before transitioning
+                    duration_secs = len(audio_data) / 22050.0
+                    await asyncio.sleep(duration_secs + 0.2)
                     if self._state == OrchestratorState.SPEAKING:
-                        self._set_state(OrchestratorState.LISTENING)
+                        self._enter_interactive_mode()
                 else:
                     logger.warning("empty_acknowledgement_audio")
-                    self._set_state(OrchestratorState.LISTENING)
+                    self._enter_interactive_mode()
             except Exception as e:
                 logger.error("speak_acknowledgement_error", error=str(e))
-                self._set_state(OrchestratorState.LISTENING)
+                self._enter_interactive_mode()
 
         self._dispatch_coroutine(_async_speak())
     
@@ -570,15 +656,19 @@ class VoiceOrchestrator:
             return
         
         # Buffer speech captured during wake_word_ack so we can replay it once
-        # the acknowledgement finishes and we enter LISTENING state.
+        # the acknowledgement finishes and we enter INTERACTIVE state.
         if self._state == OrchestratorState.WAKE_WORD_ACK:
             logger.info("buffering_speech_segment_during_wake_ack", duration_ms=segment.duration_ms)
             self._buffered_speech_segment = segment
             return
 
-        # Only process if in LISTENING state (after wake word)
-        if self._state != OrchestratorState.LISTENING:
+        # Process speech in LISTENING (single-turn) or INTERACTIVE (conversation) state
+        if self._state not in (OrchestratorState.LISTENING, OrchestratorState.INTERACTIVE):
             return
+
+        # Reset idle timer whenever the user speaks
+        if self._interactive_mode:
+            self._reset_idle_timer()
         
         logger.info(
             "speech_segment_complete",
@@ -601,7 +691,11 @@ class VoiceOrchestrator:
             
         except Exception as e:
             logger.error("transcription_error", error=str(e))
-            self._set_state(OrchestratorState.LISTENING)
+            if self._interactive_mode:
+                self._set_state(OrchestratorState.INTERACTIVE)
+                self._reset_idle_timer()
+            else:
+                self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
     
     def _on_stt_complete(self, text: str):
         """
@@ -616,19 +710,44 @@ class VoiceOrchestrator:
             return
         
         self._stats.completed_transcriptions += 1
-        
+
         if not text.strip():
             logger.warning("empty_transcription")
-            # Go back to listening
+            # Go back to the appropriate listening state
             if self.state == OrchestratorState.PROCESSING:
-                self._set_state(OrchestratorState.LISTENING)
+                if self._interactive_mode:
+                    self._set_state(OrchestratorState.INTERACTIVE)
+                    self._reset_idle_timer()
+                else:
+                    self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
             return
-        
+
         logger.info("transcription_complete", text=text)
+
+        # Check for cancel phrases when in interactive mode
+        if self._interactive_mode:
+            self._reset_idle_timer()
+            text_lower = text.strip().lower()
+            cancel_phrases = self.config.bridge.interactive.cancel_phrases
+            if any(phrase in text_lower for phrase in cancel_phrases):
+                logger.info("cancel_phrase_detected", text=text)
+                self._exit_interactive_mode("cancel_phrase")
+                return
         
         # Transition to PROCESSING state
         self._set_state(OrchestratorState.PROCESSING)
         
+        # Capture flag for use inside the coroutine
+        in_interactive = self._interactive_mode
+
+        def _fallback_state():
+            """Return to appropriate listening state on error."""
+            if in_interactive and self._interactive_mode:
+                self._set_state(OrchestratorState.INTERACTIVE)
+                self._reset_idle_timer()
+            else:
+                self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
+
         # Send to OpenClaw
         async def send_to_openclaw():
             # Check API mode
@@ -642,19 +761,19 @@ class VoiceOrchestrator:
                         self._on_response_received(response_text)
                     else:
                         logger.error("empty_http_response")
-                        self._set_state(OrchestratorState.LISTENING)
+                        _fallback_state()
                 except OpenClawHTTPTimeoutError:
                     logger.error("http_message_timeout")
-                    self._set_state(OrchestratorState.LISTENING)
+                    _fallback_state()
                 except OpenClawHTTPError as e:
                     logger.error("http_message_error", error=str(e))
-                    self._set_state(OrchestratorState.LISTENING)
+                    _fallback_state()
             else:
                 # Use WebSocket (legacy mode)
                 success = await self.websocket.send_voice_input(text)
                 if not success:
                     logger.error("failed_to_send_to_openclaw")
-                    self._set_state(OrchestratorState.LISTENING)
+                    _fallback_state()
         
         self._dispatch_coroutine(send_to_openclaw())
     
@@ -710,17 +829,37 @@ class VoiceOrchestrator:
         logger.info("response_received", text=text)
         self._stats.completed_responses += 1
 
+        # Capture interactive flag at dispatch time so the closure sees
+        # the right value even if the flag changes while audio plays.
+        was_interactive = self._interactive_mode
+
         async def _async_respond():
             try:
                 audio_data = await asyncio.to_thread(self.tts_engine.speak, text)
                 if len(audio_data) > 0:
                     self.audio_pipeline.play_audio(audio_data, sample_rate=22050)
                     self._set_state(OrchestratorState.SPEAKING)
+                    # Wait for audio to finish before returning to listening
+                    duration_secs = len(audio_data) / 22050.0
+                    await asyncio.sleep(duration_secs + 0.3)
+                    if self._state == OrchestratorState.SPEAKING:
+                        if was_interactive and self._interactive_mode:
+                            self._set_state(OrchestratorState.INTERACTIVE)
+                            self._reset_idle_timer()
+                        else:
+                            self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
                 else:
-                    self._set_state(OrchestratorState.LISTENING)
+                    if was_interactive and self._interactive_mode:
+                        self._set_state(OrchestratorState.INTERACTIVE)
+                        self._reset_idle_timer()
+                    else:
+                        self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
             except Exception as e:
                 logger.error("response_tts_error", error=str(e))
-                self._set_state(OrchestratorState.LISTENING)
+                if was_interactive and self._interactive_mode:
+                    self._set_state(OrchestratorState.INTERACTIVE)
+                else:
+                    self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
 
         self._dispatch_coroutine(_async_respond())
     
