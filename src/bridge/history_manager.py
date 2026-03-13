@@ -40,16 +40,21 @@ class ConversationTurn:
     @classmethod
     def from_db_row(cls, row) -> "ConversationTurn":
         """Create from database row."""
+        d = dict(row)
+        try:
+            tool_calls = json.loads(d['tool_calls']) if d.get('tool_calls') else None
+        except (json.JSONDecodeError, ValueError):
+            tool_calls = None
         return cls(
-            id=row['id'],
-            session_id=row['session_id'],
-            turn_index=row['turn_index'],
-            timestamp=row['timestamp'],
-            role=row['role'],
-            content=row['content'],
-            message_type=row['message_type'],
-            speakability=row['speakability'],
-            tool_calls=json.loads(row['tool_calls']) if row['tool_calls'] else None
+            id=d['id'],
+            session_id=d['session_id'],
+            turn_index=d['turn_index'],
+            timestamp=d['timestamp'],
+            role=d['role'],
+            content=d['content'],
+            message_type=d.get('message_type'),
+            speakability=d.get('speakability'),
+            tool_calls=tool_calls,
         )
     
     def to_dict(self) -> Dict[str, Any]:

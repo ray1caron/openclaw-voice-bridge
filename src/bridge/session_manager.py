@@ -47,21 +47,30 @@ class Session:
     @classmethod
     def from_db_row(cls, row) -> "Session":
         """Create Session from database row.
-        
+
         Args:
             row: sqlite3.Row from sessions table
-            
+
         Returns:
             Session instance
         """
+        d = dict(row)
+        try:
+            context_window = json.loads(d['context_window']) if d.get('context_window') else []
+        except (json.JSONDecodeError, ValueError):
+            context_window = []
+        try:
+            metadata = json.loads(d['metadata']) if d.get('metadata') else {}
+        except (json.JSONDecodeError, ValueError):
+            metadata = {}
         return cls(
-            id=row['id'],
-            session_uuid=row['session_uuid'],
-            created_at=row['created_at'],
-            last_activity=row['last_activity'],
-            state=row['state'],
-            context_window=json.loads(row['context_window']) if row['context_window'] else [],
-            metadata=json.loads(row['metadata']) if row['metadata'] else {}
+            id=d['id'],
+            session_uuid=d['session_uuid'],
+            created_at=d['created_at'],
+            last_activity=d['last_activity'],
+            state=d['state'],
+            context_window=context_window,
+            metadata=metadata,
         )
     
     def to_db_dict(self) -> Dict[str, Any]:

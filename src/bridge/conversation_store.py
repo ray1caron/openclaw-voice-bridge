@@ -66,12 +66,19 @@ class ConversationStore:
             conn.close()
     
     def _ensure_db_exists(self):
-        """Initialize database if it doesn't exist."""
-        if self.db_path.exists():
-            return
-        
-        with self._get_connection() as conn:
-            self._init_schema(conn)
+        """Initialize or migrate the database schema.
+
+        Creates the schema from scratch for new databases, and runs
+        migrate() for existing databases so that old schema versions
+        are upgraded automatically on startup.
+        """
+        if not self.db_path.exists():
+            with self._get_connection() as conn:
+                self._init_schema(conn)
+        else:
+            # Existing DB — run migrations to pick up any schema additions
+            # added after the DB was first created.
+            self.migrate()
     
     def _init_schema(self, conn: sqlite3.Connection):
         """Initialize database schema.
