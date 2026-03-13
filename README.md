@@ -1,146 +1,161 @@
-# Voice-OpenClaw Bridge v4.4.0
+# Voice-OpenClaw Bridge
 
-A bidirectional voice interface where OpenClaw is the brain, voice is the I/O layer.
+A voice I/O layer for OpenClaw. Detects a wake word, transcribes speech,
+sends it to OpenClaw via HTTP, speaks the response, and keeps the conversation
+going in interactive mode until the user says a cancel phrase or goes silent.
 
-**Last Updated:** 2026-03-06 10:26 PST
-
-## Features
-
-- **Wake Word Detection** - STT-based detection (default: `"computer"`)
-- **Speech-to-Text** - Faster-Whisper with CUDA acceleration
-- **Text-to-Speech** - Piper TTS with natural voices
-- **Audio Pipeline** - Full duplex audio with VAD and barge-in
-- **WebSocket Server** - Real-time bidirectional communication (port 18790)
-- **OpenClaw Channel Extension** - TypeScript extension for OpenClaw Gateway
-- **Protocol Support** - 14 message types for rich interaction
-- **Session Persistence** - SQLite-based conversation history
-- **Bug Tracking** - Integrated error capture and reporting
-
-## Architecture
+## How it works
 
 ```
-Microphone → Audio Pipeline → Wake Word Detector
-                                    │
-                                    ▼
-                            STT Engine (Whisper)
-                                    │
-                                    ▼
-                            WebSocket Server (18790)
-                                    │
-                                    │ WebSocket
-                                    ▼
-                            OpenClaw Gateway
-                                    │
-                                    │ Response
-                                    ▼
-                            TTS Engine (Piper)
-                                    │
-                                    ▼
-                            Speaker Output
+Microphone
+    │
+    ▼
+Audio Pipeline (WebRTC VAD)
+    │
+    ├─── Wake Word Detector (STT or OpenWakeWord)
+    │         │
+    │         ▼  wake word detected
+    │    [WAKE_WORD_ACK] ──HTTP──► OpenClaw
+    │         │                        │ ack phrase
+    │         ▼                        │
+    │    [INTERACTIVE] ◄───────────────┘
+    │         │
+    │         │  user speaks
+    │         ▼
+    │    STT (Faster-Whisper)
+    │         │ text
+    │         ▼
+    │    OpenClaw  (HTTP /v1/chat/completions)
+    │         │ response
+    │         ▼
+    │    TTS (Piper) → Speaker
+    │         │
+    │         └─► back to [INTERACTIVE]
+    │
+    └─── (cancel phrase / idle timeout → back to wake word detection)
 ```
 
-## Quick Start
+## State machine
+
+| State | Description |
+|-------|-------------|
+| `listening_for_wake_word` | Continuously scanning audio for the wake word |
+| `wake_word_ack` | Wake word detected; waiting for OpenClaw's acknowledgement |
+| `interactive` | Active conversation — user speaks, OpenClaw responds, repeat |
+| `processing` | Speech transcribed; waiting for OpenClaw HTTP response |
+| `speaking` | Playing OpenClaw's response via TTS |
+| `error` | Unrecoverable error; check logs |
+
+## Quick start
 
 ```bash
-# Install
-./install.sh
+# Install dependencies
+pip install -e .
+
+# Copy and edit config
+cp config.yaml ~/.voice-bridge/config.yaml
+$EDITOR ~/.voice-bridge/config.yaml
 
 # Run
 PYTHONPATH=src python3 -m bridge.main
 ```
 
+Or use the interactive installer:
+
+```bash
+PYTHONPATH=src python3 -m installer
+```
+
 ## Configuration
 
-Config file: `~/.voice-bridge/config.yaml`
+`~/.voice-bridge/config.yaml` — copy from `config.yaml` in this repo.
+
+Key settings:
 
 ```yaml
-bridge:
-  wake_word: "hey hal"
-  
-audio:
-  input_device: 10    # Device index or name
-  output_device: 10
-  sample_rate: 44100
-  
-stt:
-  model: base
-  device: auto
-  
-tts:
-  voice: en_US-lessac-medium
-  
 openclaw:
-  host: localhost
-  port: 8080
+  host: "localhost"
+  port: 18789
+  api_mode: "http"          # http (default) or websocket
+
+wake_word:
+  wake_word: "computer"
+  backend: "stt"            # stt (reliable) or openwakeword (fast)
+
+bridge:
+  acknowledgement:
+    enabled: true
+    timeout_ms: 5000        # wait this long for OpenClaw's ack reply
+
+  interactive:
+    enabled: true
+    idle_timeout_seconds: 30.0   # exit after 30 s of silence
+    cancel_phrases:
+      - "stop"
+      - "cancel"
+      - "goodbye"
 ```
+
+## Interactive mode
+
+After the wake word is acknowledged the bridge enters **interactive mode**:
+the user can keep speaking without repeating the wake word. OpenClaw responds
+to each turn. The session ends when:
+
+- The user says a **cancel phrase** (configurable, default: stop / cancel /
+  nevermind / never mind / exit / goodbye / bye)
+- The user is **silent for `idle_timeout_seconds`** (default 30 s)
+
+## Debugging
+
+Every state transition, interactive mode entry/exit, HTTP timeout, and cancel
+phrase is recorded to `~/.voice-bridge/bugs.db` (SQLite, `events` table).
+
+```python
+from bridge.bug_tracker import BugTracker
+tracker = BugTracker.get_instance()
+
+# Last 50 state transitions
+for e in tracker.get_state_history(limit=50):
+    print(e["timestamp"], e["from_state"], "→", e["to_state"],
+          f"({e['duration_ms']:.0f} ms)")
+
+# All interactive mode events
+for e in tracker.get_recent_events(event_type="interactive_exit"):
+    print(e["timestamp"], e["trigger"])
+```
+
+Exceptions are stored in the `bugs` table and printed to stderr at HIGH/CRITICAL
+severity.
 
 ## Components
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| Wake Word | `wake_word.py` | Phrase detection with WebRTC VAD |
-| STT | `stt.py` | Faster-Whisper speech recognition |
-| TTS | `tts.py` | Piper voice synthesis |
-| Orchestrator | `orchestrator.py` | State machine for voice loop |
-| Audio Pipeline | `audio_pipeline.py` | Device management, VAD, barge-in |
-| WebSocket | `websocket_client.py` | OpenClaw communication |
+| File | Purpose |
+|------|---------|
+| `src/bridge/orchestrator.py` | State machine; coordinates all components |
+| `src/bridge/audio_pipeline.py` | Microphone capture, VAD, TTS playback |
+| `src/bridge/wake_word.py` | Wake word detection (STT or OpenWakeWord backend) |
+| `src/bridge/stt.py` | Faster-Whisper speech-to-text |
+| `src/bridge/tts.py` | Piper text-to-speech |
+| `src/bridge/http_client.py` | OpenClaw HTTP API client |
+| `src/bridge/websocket_client.py` | OpenClaw WebSocket client (legacy) |
+| `src/bridge/websocket_server.py` | Inbound WebSocket server (port 18790) |
+| `src/bridge/config.py` | Pydantic configuration models |
+| `src/bridge/bug_tracker.py` | Error capture + diagnostic event recording |
+| `src/bridge/database.py` | Thread-safe SQLite connection manager |
 
-## Installation UI
+## Requirements
 
-Run the interactive installer:
+- Python 3.11+
+- `faster-whisper` — STT
+- `piper-tts` — TTS
+- `sounddevice` — audio I/O
+- `webrtcvad` — voice activity detection
+- `aiohttp` — HTTP client
+- `websockets` — WebSocket support
+- `pydantic`, `pydantic-settings` — configuration
+- `structlog` — structured logging
 
-```bash
-./install.sh
-```
-
-Features:
-- Detects previous installations
-- Tests microphone and speakers (with playback)
-- Shows configuration summary
-- Displays known bugs
-- Validates dependencies
-
-## Dependencies
-
-```bash
-pip install faster-whisper piper-tts sounddevice numpy webrtcvad websockets pydantic pyyaml
-```
-
-## Project Structure
-
-```
-voice-bridge-v4/
-├── src/
-│   ├── bridge/
-│   │   ├── main.py              # Entry point
-│   │   ├── config.py            # Configuration
-│   │   ├── wake_word.py         # Wake word detection
-│   │   ├── stt.py               # Speech-to-text
-│   │   ├── tts.py               # Text-to-speech
-│   │   ├── orchestrator.py      # Voice loop
-│   │   ├── audio_pipeline.py    # Audio I/O
-│   │   ├── websocket_client.py  # OpenClaw connection
-│   │   └── ...
-│   └── installer/
-│       ├── interactive.py       # Installation wizard
-│       ├── detector.py          # Installation detection
-│       ├── hardware_test.py     # Audio testing
-│       └── ...
-├── tests/
-├── install.sh
-└── requirements.txt
-```
-
-## Status
-
-- ✅ Installation UI - Complete (30 tests passing)
-- ✅ Wake Word - Implemented
-- ✅ STT (Whisper) - Implemented
-- ✅ TTS (Piper) - Implemented
-- ✅ Orchestrator - Implemented
-- ✅ Audio Pipeline - Working
-- ✅ WebSocket Client - Configured
-
-## License
-
-MIT
+Optional:
+- `openwakeword` — fast hardware-accelerated wake word detection
+- `psutil` — system info in bug reports

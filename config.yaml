@@ -51,11 +51,25 @@ bridge:
   max_session_duration: 300.0
   log_level: "INFO"          # Options: DEBUG, INFO, WARNING, ERROR
   hot_reload: true
+
+  # Wake word acknowledgement - OpenClaw responds with a spoken phrase
   acknowledgement:
     enabled: true
-    response_phrase: "Yes?"
-    timeout_ms: 5000
-    fallback_to_local_tts: true
+    timeout_ms: 5000          # ms to wait for OpenClaw's ack response
+
+  # Interactive conversation mode
+  # After the wake word, the bridge stays in conversation until cancelled
+  interactive:
+    enabled: true
+    idle_timeout_seconds: 30.0  # exit after this many seconds of silence
+    cancel_phrases:             # say any of these to end the session
+      - "stop"
+      - "cancel"
+      - "nevermind"
+      - "never mind"
+      - "exit"
+      - "goodbye"
+      - "bye"
 
 # Session Persistence
 persistence:

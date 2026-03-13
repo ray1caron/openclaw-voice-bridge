@@ -161,6 +161,11 @@ class VoiceOrchestrator:
         self._idle_timer: Optional[threading.Timer] = None
         self._idle_timer_lock = threading.Lock()
 
+        # Diagnostic: track when each state was entered so _set_state can
+        # record how long the orchestrator spent in each state.
+        self._state_entry_times: dict = {}
+        self._state_entry_times[OrchestratorState.IDLE] = time.time()
+
         # Buffer for speech segments captured during wake_word_ack (user speaks
         # their command before/during the "Yes?" acknowledgement audio).
         self._buffered_speech_segment: Optional[object] = None
@@ -206,6 +211,9 @@ class VoiceOrchestrator:
     def _set_state(self, new_state: OrchestratorState):
         """Set orchestrator state and notify callbacks."""
         buffered = None
+        old_state_for_event = None
+        duration_ms_for_event = None
+
         with self._state_lock:
             old_state = self._state
             if old_state != new_state:
@@ -216,6 +224,13 @@ class VoiceOrchestrator:
                     old=old_state.value,
                     new=new_state.value
                 )
+
+                # Compute time spent in old state for the diagnostic event
+                old_state_for_event = old_state
+                entry_time = self._state_entry_times.get(old_state)
+                if entry_time is not None:
+                    duration_ms_for_event = (time.time() - entry_time) * 1000
+                self._state_entry_times[new_state] = time.time()
 
                 # Drain any speech segment buffered during wake_word_ack
                 if new_state in (OrchestratorState.LISTENING, OrchestratorState.INTERACTIVE) and self._buffered_speech_segment is not None:
@@ -228,6 +243,21 @@ class VoiceOrchestrator:
                         callback(old_state, new_state)
                     except Exception as e:
                         logger.error("state_callback_error", error=str(e))
+
+        # Record state transition to the diagnostic events DB (outside lock,
+        # non-blocking — the bug tracker uses a background writer thread).
+        if old_state_for_event is not None:
+            try:
+                from bridge.bug_tracker import BugTracker
+                BugTracker.get_instance().record_event(
+                    component="orchestrator",
+                    event_type="state_change",
+                    from_state=old_state_for_event.value,
+                    to_state=new_state.value,
+                    duration_ms=duration_ms_for_event,
+                )
+            except Exception:
+                pass  # Never let telemetry break core flow
 
         if buffered is not None:
             logger.info("replaying_buffered_speech_segment", duration_ms=buffered.duration_ms)
@@ -502,6 +532,17 @@ class VoiceOrchestrator:
             self._wake_ack_timer.cancel()
             self._wake_ack_timer = None
 
+        try:
+            from bridge.bug_tracker import BugTracker
+            BugTracker.get_instance().record_event(
+                component="orchestrator",
+                event_type="ack_timeout",
+                trigger="timer",
+                metadata={"timeout_ms": getattr(self.config.bridge.acknowledgement, "timeout_ms", None)},
+            )
+        except Exception:
+            pass
+
         self._enter_interactive_mode()
 
     # =========================================================================
@@ -536,6 +577,19 @@ class VoiceOrchestrator:
         self._set_state(OrchestratorState.INTERACTIVE)
         self._reset_idle_timer()
 
+        try:
+            from bridge.bug_tracker import BugTracker
+            BugTracker.get_instance().record_event(
+                component="orchestrator",
+                event_type="interactive_enter",
+                metadata={
+                    "idle_timeout_seconds": interactive_cfg.idle_timeout_seconds,
+                    "cancel_phrases": interactive_cfg.cancel_phrases,
+                },
+            )
+        except Exception:
+            pass
+
     def _exit_interactive_mode(self, reason: str = "unknown"):
         """
         Exit interactive mode and return to wake word detection.
@@ -548,6 +602,17 @@ class VoiceOrchestrator:
         logger.info("exiting_interactive_mode", reason=reason)
         self._interactive_mode = False
         self._cancel_idle_timer()
+
+        try:
+            from bridge.bug_tracker import BugTracker
+            BugTracker.get_instance().record_event(
+                component="orchestrator",
+                event_type="interactive_exit",
+                trigger=reason,
+            )
+        except Exception:
+            pass
+
         if self._running:
             self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
 
@@ -731,6 +796,16 @@ class VoiceOrchestrator:
             cancel_phrases = self.config.bridge.interactive.cancel_phrases
             if any(phrase in text_lower for phrase in cancel_phrases):
                 logger.info("cancel_phrase_detected", text=text)
+                try:
+                    from bridge.bug_tracker import BugTracker
+                    BugTracker.get_instance().record_event(
+                        component="orchestrator",
+                        event_type="cancel_phrase",
+                        trigger="user_speech",
+                        metadata={"text": text},
+                    )
+                except Exception:
+                    pass
                 self._exit_interactive_mode("cancel_phrase")
                 return
         
@@ -764,6 +839,16 @@ class VoiceOrchestrator:
                         _fallback_state()
                 except OpenClawHTTPTimeoutError:
                     logger.error("http_message_timeout")
+                    try:
+                        from bridge.bug_tracker import BugTracker
+                        BugTracker.get_instance().record_event(
+                            component="orchestrator",
+                            event_type="http_timeout",
+                            trigger="openclaw_no_response",
+                            metadata={"text_length": len(text), "timeout_s": self.config.openclaw.timeout},
+                        )
+                    except Exception:
+                        pass
                     _fallback_state()
                 except OpenClawHTTPError as e:
                     logger.error("http_message_error", error=str(e))
