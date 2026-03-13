@@ -229,7 +229,7 @@ class AppConfig(BaseSettings):
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         validate_assignment=True,
-        extra="forbid",  # Strict: fail on unknown fields
+        extra="ignore",  # Silently ignore unknown fields from old configs
     )
     
     # Nested configuration sections

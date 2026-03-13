@@ -541,19 +541,24 @@ class BugTracker:
             row = cursor.fetchone()
 
             if row:
+                d = dict(row)
+                try:
+                    system_state = json.loads(d.get("system_state") or "{}")
+                except (json.JSONDecodeError, ValueError):
+                    system_state = {}
                 return BugReport(
-                    id=row["id"],
-                    timestamp=row["timestamp"],
-                    severity=row["severity"],
-                    component=row["component"],
-                    title=row["title"],
-                    description=row["description"],
-                    stack_trace=row["stack_trace"],
-                    system_state=json.loads(row["system_state"]),
-                    user_context=row["user_context"],
-                    status=row["status"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
+                    id=d["id"],
+                    timestamp=d["timestamp"],
+                    severity=d["severity"],
+                    component=d["component"],
+                    title=d["title"],
+                    description=d["description"],
+                    stack_trace=d.get("stack_trace"),
+                    system_state=system_state,
+                    user_context=d.get("user_context"),
+                    status=d["status"],
+                    created_at=d["created_at"],
+                    updated_at=d["updated_at"],
                 )
             return None
 
@@ -588,19 +593,24 @@ class BugTracker:
 
             bugs = []
             for row in rows:
+                d = dict(row)
+                try:
+                    system_state = json.loads(d.get("system_state") or "{}")
+                except (json.JSONDecodeError, ValueError):
+                    system_state = {}
                 bugs.append(BugReport(
-                    id=row["id"],
-                    timestamp=row["timestamp"],
-                    severity=row["severity"],
-                    component=row["component"],
-                    title=row["title"],
-                    description=row["description"],
-                    stack_trace=row["stack_trace"],
-                    system_state=json.loads(row["system_state"]),
-                    user_context=row["user_context"],
-                    status=row["status"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
+                    id=d["id"],
+                    timestamp=d["timestamp"],
+                    severity=d["severity"],
+                    component=d["component"],
+                    title=d["title"],
+                    description=d["description"],
+                    stack_trace=d.get("stack_trace"),
+                    system_state=system_state,
+                    user_context=d.get("user_context"),
+                    status=d["status"],
+                    created_at=d["created_at"],
+                    updated_at=d["updated_at"],
                 ))
             return bugs
 
