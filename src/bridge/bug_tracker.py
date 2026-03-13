@@ -340,25 +340,42 @@ class BugTracker:
                 if event is None:
                     break  # Sentinel: shut down
 
-                with sqlite3.connect(self.db_path) as conn:
-                    conn.execute(
-                        """INSERT INTO events
-                           (timestamp, component, event_type, from_state, to_state,
-                            duration_ms, trigger, metadata, session_uptime_ms)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            event["timestamp"],
-                            event["component"],
-                            event["event_type"],
-                            event["from_state"],
-                            event["to_state"],
-                            event["duration_ms"],
-                            event["trigger"],
-                            event["metadata"],
-                            event["session_uptime_ms"],
-                        ),
-                    )
-                    conn.commit()
+                params = (
+                    event["timestamp"],
+                    event["component"],
+                    event["event_type"],
+                    event["from_state"],
+                    event["to_state"],
+                    event["duration_ms"],
+                    event["trigger"],
+                    event["metadata"],
+                    event["session_uptime_ms"],
+                )
+                try:
+                    with sqlite3.connect(self.db_path) as conn:
+                        conn.execute(
+                            """INSERT INTO events
+                               (timestamp, component, event_type, from_state, to_state,
+                                duration_ms, trigger, metadata, session_uptime_ms)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            params,
+                        )
+                        conn.commit()
+                except sqlite3.OperationalError as e:
+                    if "no such table" in str(e):
+                        # DB existed before events table was added — migrate and retry once.
+                        self._init_db()
+                        with sqlite3.connect(self.db_path) as conn:
+                            conn.execute(
+                                """INSERT INTO events
+                                   (timestamp, component, event_type, from_state, to_state,
+                                    duration_ms, trigger, metadata, session_uptime_ms)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                params,
+                            )
+                            conn.commit()
+                    else:
+                        raise
             except Exception as e:
                 # Never crash the writer thread — just log and continue
                 logger.debug("event_writer_error", error=str(e))
