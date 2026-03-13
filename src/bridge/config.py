@@ -145,16 +145,15 @@ class PersistenceConfig(BaseModel):
 
 class WakeAcknowledgementConfig(BaseModel):
     """Wake word acknowledgement configuration.
-    
-    When enabled, sends an acknowledgement to OpenClaw after wake word detection,
-    allowing OpenClaw to respond with a voice_response containing the acknowledgement phrase.
-    Falls back to local TTS if OpenClaw doesn't respond within timeout.
+
+    When enabled, sends a wake word notification to OpenClaw after detection.
+    OpenClaw is solely responsible for responding with a voice_response.
+    If OpenClaw does not respond within timeout, the bridge proceeds silently
+    to listening state — no local fallback phrases are ever generated.
     """
-    
+
     enabled: bool = Field(default=True, description="Enable wake word acknowledgement")
-    response_phrase: str = Field(default="Yes?", description="Phrase to speak as acknowledgement")
-    timeout_ms: int = Field(default=5000, ge=1000, le=10000, description="Timeout for OpenClaw response")
-    fallback_to_local_tts: bool = Field(default=True, description="Use local TTS if OpenClaw doesn't respond")
+    timeout_ms: int = Field(default=5000, ge=1000, le=10000, description="Timeout waiting for OpenClaw acknowledgement response")
 
 
 class WakeWordConfig(BaseModel):
@@ -164,6 +163,34 @@ class WakeWordConfig(BaseModel):
     openwakeword_model: str = Field(default="hey_mycroft", description="OpenWakeWord model name")
     openwakeword_threshold: float = Field(default=0.15, ge=0.0, le=1.0, description="Detection threshold")
     refractory_seconds: float = Field(default=2.0, ge=0.0, le=10.0, description="Cooldown period after detection")
+
+
+class InteractiveConfig(BaseModel):
+    """Interactive conversation mode configuration.
+
+    After the wake word is acknowledged, the bridge enters an interactive
+    session where the user can speak and OpenClaw responds in a continuous
+    loop without requiring the wake word again.
+
+    The session ends when:
+    - The user says one of the configured cancel phrases
+    - No speech is detected for idle_timeout_seconds
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enter interactive mode after wake word acknowledgement"
+    )
+    idle_timeout_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=300.0,
+        description="Exit interactive mode after this many seconds without user speech"
+    )
+    cancel_phrases: list[str] = Field(
+        default=["stop", "cancel", "nevermind", "never mind", "exit", "goodbye", "bye"],
+        description="Phrases that exit interactive mode when spoken by the user"
+    )
 
 
 class BridgeConfig(BaseModel):
@@ -178,6 +205,12 @@ class BridgeConfig(BaseModel):
     acknowledgement: WakeAcknowledgementConfig = Field(
         default_factory=WakeAcknowledgementConfig,
         description="Wake word acknowledgement settings"
+    )
+
+    # Interactive conversation mode
+    interactive: InteractiveConfig = Field(
+        default_factory=InteractiveConfig,
+        description="Interactive conversation mode settings"
     )
 
 
