@@ -321,7 +321,19 @@ class BugTracker:
         })
 
     def _event_writer_loop(self) -> None:
-        """Background thread: drain the event queue and write to SQLite."""
+        """Background thread: drain the event queue and write to SQLite.
+
+        Calls _init_db() once at startup so that databases created by older
+        versions of the code (which lack the events table) are migrated before
+        the first INSERT is attempted.
+        """
+        # Ensure schema is current — handles DBs created before the events
+        # table was added without requiring a separate migration step.
+        try:
+            self._init_db()
+        except Exception as e:
+            logger.warning("event_writer_schema_init_failed", error=str(e))
+
         while True:
             try:
                 event = self._event_queue.get()
