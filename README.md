@@ -84,12 +84,15 @@ openclaw:
   host: "localhost"
   port: 18789
   api_mode: "http"          # http (default) or websocket
+  auth_token: null           # env vars take priority: OPENCLAW_GATEWAY_TOKEN or OPENCLAW_TOKEN
 
 wake_word:
   wake_word: "computer"
   backend: "stt"            # stt (reliable) or openwakeword (fast)
 
 bridge:
+  websocket_server:
+    port: 18790             # port clients connect to (configurable)
   acknowledgement:
     enabled: true
     timeout_ms: 5000        # wait this long for OpenClaw's ack reply
@@ -146,7 +149,7 @@ severity.
 | `src/bridge/tts.py` | Piper text-to-speech |
 | `src/bridge/http_client.py` | OpenClaw HTTP API client |
 | `src/bridge/websocket_client.py` | OpenClaw WebSocket client (legacy) |
-| `src/bridge/websocket_server.py` | Inbound WebSocket server (port 18790) |
+| `src/bridge/websocket_server.py` | Inbound WebSocket server (port from `bridge.websocket_server.port`, default 18790) |
 | `src/bridge/config.py` | Pydantic configuration models |
 | `src/bridge/bug_tracker.py` | Error capture + diagnostic event recording |
 | `src/bridge/database.py` | Thread-safe SQLite connection manager |

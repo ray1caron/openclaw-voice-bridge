@@ -63,7 +63,7 @@ The installer guides you through setup in 8 steps:
   - TTS voice
   - Audio device
   - OpenClaw URL
-  - **WebSocket port** (default: 18790)
+  - **WebSocket port** (from `bridge.websocket_server.port`, default 18790)
 
 #### Step 6: Known Issues Check
 - Scans bug database for unresolved issues
@@ -73,7 +73,7 @@ The installer guides you through setup in 8 steps:
 #### Step 7: OpenClaw Integration Test 🆕
 - Checks if OpenClaw is available
 - **WebSocket Server Test:**
-  - Starts WebSocket server on port 18790
+  - Starts WebSocket server on configured port (default 18790)
   - Connects test client
   - Tests ping/pong protocol
   - Verifies message serialization
@@ -183,20 +183,19 @@ Other files always use `~/.voice-bridge/`:
 ### Default Configuration
 
 ```yaml
-# ~/.voice-bridge/config.yaml
+# ~/.voice-bridge/config.yaml  (or $XDG_CONFIG_HOME/voice-bridge/config.yaml)
 wake_word:
-  wake_word: "hey jarvis"
-  backend: "openwakeword"
-  threshold: 0.5
+  wake_word: "computer"      # phrase to listen for
+  backend: "stt"             # "stt" (reliable) or "openwakeword" (fast)
 
 audio:
   sample_rate: 16000
-  input_device: null  # Auto-detect
-  output_device: null  # Auto-detect
+  input_device: null         # null = auto-detect
+  output_device: null
 
 stt:
-  model: "tiny"
-  language: "en"
+  model: "base"
+  language: null             # null = auto-detect
 
 tts:
   voice: "en_US-lessac-medium"
@@ -205,16 +204,27 @@ tts:
 openclaw:
   host: "localhost"
   port: 18789
-  secure: false
+  auth_token: null           # env vars take priority: OPENCLAW_GATEWAY_TOKEN or OPENCLAW_TOKEN
+
+bridge:
+  websocket_server:
+    port: 18790              # port clients connect to
+
+persistence:
+  ttl_minutes: 30
+  cleanup_interval: 60       # must be < ttl_minutes * 60
 ```
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `OPENCLAW_GATEWAY_TOKEN` | OpenClaw authentication token |
+| `OPENCLAW_GATEWAY_TOKEN` | OpenClaw authentication token (highest priority) |
+| `OPENCLAW_TOKEN` | Alternative token variable (checked after `OPENCLAW_GATEWAY_TOKEN`) |
 | `VOICE_BRIDGE_CONFIG` | Custom config file path (overrides search order) |
 | `XDG_CONFIG_HOME` | Base directory for user config files (default: `~/.config`) |
+
+> **Token priority:** `OPENCLAW_GATEWAY_TOKEN` → `OPENCLAW_TOKEN` → `auth_token` in config file
 
 ---
 
