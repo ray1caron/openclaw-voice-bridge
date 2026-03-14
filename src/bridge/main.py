@@ -150,10 +150,11 @@ async def main():
         
         # Initialize WebSocket server for OpenClaw Gateway communication
         try:
+            ws_cfg = config.bridge.websocket_server
             ws_server = WebSocketServer.get_instance(
-                host="0.0.0.0",
-                port=18790,
-                max_connections=10
+                host=ws_cfg.host,
+                port=ws_cfg.port,
+                max_connections=ws_cfg.max_connections,
             )
             logger.info("WebSocket server initialized")
         except Exception as e:

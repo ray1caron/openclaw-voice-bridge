@@ -591,7 +591,7 @@ class BugTrackerUI:
                 return dt.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 return dt.strftime("%Y-%m-%d %H:%M")
-        except:
+        except (ValueError, TypeError, AttributeError):
             return ts[:19] if len(ts) > 19 else ts
     
     def export_bugs(self, output_path: Path, format: str = "json"):

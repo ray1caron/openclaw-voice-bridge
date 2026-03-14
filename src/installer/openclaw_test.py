@@ -290,16 +290,12 @@ def run_openclaw_test() -> HardwareTestResult:
         cfg_obj = get_config()
         cfg = cfg_obj.openclaw
 
-        # Find config file path for display
-        import os
+        # Find config file path for display (same search order as AppConfig.load)
+        from bridge.config import CONFIG_SEARCH_PATHS
         config_path = None
-        candidates = [
-            os.path.expanduser("~/.voice-bridge/config.yaml"),
-            "config.yaml",
-        ]
-        for p in candidates:
-            if os.path.exists(p):
-                config_path = os.path.abspath(p)
+        for candidate in CONFIG_SEARCH_PATHS:
+            if candidate.exists():
+                config_path = str(candidate)
                 break
 
         result = test_openclaw_connection(

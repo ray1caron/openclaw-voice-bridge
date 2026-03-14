@@ -856,14 +856,17 @@ class InteractiveInstaller:
         import getpass
         import os
 
-        host = self._openclaw_test_result.host if self._openclaw_test_result else "localhost"
-        port = self._openclaw_test_result.port if self._openclaw_test_result else 18789
+        from bridge.config import get_config as _get_cfg
+        _oc_defaults = _get_cfg().openclaw
+        host = self._openclaw_test_result.host if self._openclaw_test_result else _oc_defaults.host
+        port = self._openclaw_test_result.port if self._openclaw_test_result else _oc_defaults.port
 
         # Find the voice-bridge config path for display / saving
+        from bridge.config import CONFIG_SEARCH_PATHS
         config_path = None
-        for p in [os.path.expanduser("~/.voice-bridge/config.yaml"), "config.yaml"]:
-            if os.path.exists(p):
-                config_path = p
+        for candidate in CONFIG_SEARCH_PATHS:
+            if candidate.exists():
+                config_path = str(candidate)
                 break
 
         print()
@@ -879,20 +882,8 @@ class InteractiveInstaller:
             # Temporarily point discovery at the live host/port
             cfg_obj.openclaw.host = host
             cfg_obj.openclaw.port = port
-            # Walk every source the bridge knows about
-            token_sources = [
-                ("OPENCLAW_GATEWAY_TOKEN env var",          lambda: os.environ.get("OPENCLAW_GATEWAY_TOKEN")),
-                ("OPENCLAW_TOKEN env var",                   lambda: os.environ.get("OPENCLAW_TOKEN")),
-                ("~/.openclaw/gateway_token",                lambda: cfg_obj._get_token_from_file(
-                                                                 __import__("pathlib").Path.home() / ".openclaw" / "gateway_token")),
-                ("~/.openclaw/.token",                       lambda: cfg_obj._get_token_from_file(
-                                                                 __import__("pathlib").Path.home() / ".openclaw" / ".token")),
-                ("~/.openclaw/openclaw.json",                lambda: cfg_obj._get_token_from_openclaw_json()),
-                ("~/.openclaw/config.yaml",                  lambda: cfg_obj._get_token_from_yaml(
-                                                                 __import__("pathlib").Path.home() / ".openclaw" / "config.yaml")),
-                ("~/.openclaw/workspace/openclaw.yaml",      lambda: cfg_obj._get_token_from_yaml(
-                                                                 __import__("pathlib").Path.home() / ".openclaw" / "workspace" / "openclaw.yaml")),
-            ]
+            # Use the canonical source list from bridge.config (single source of truth)
+            token_sources = cfg_obj.get_token_sources()
             openclaw_url = f"http://{host}:{port}"
             for source_name, getter in token_sources:
                 try:

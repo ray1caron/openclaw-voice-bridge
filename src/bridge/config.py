@@ -135,11 +135,15 @@ class OpenClawConfig(BaseModel):
     )
 
     def get_auth_token(self) -> str | None:
-        """Get auth token from config or environment variable."""
-        if self.auth_token:
-            return self.auth_token
-        import os
-        return os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+        """Get auth token; environment variables take priority over config file."""
+        # Check env vars first — they intentionally override the config file
+        # so users can inject tokens without modifying the file (e.g. in CI,
+        # containers, or when switching between OpenClaw instances).
+        return (
+            os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+            or os.environ.get("OPENCLAW_TOKEN")
+            or self.auth_token
+        )
     
     @field_validator("host")
     @classmethod
@@ -152,12 +156,23 @@ class OpenClawConfig(BaseModel):
 
 class PersistenceConfig(BaseModel):
     """Session persistence configuration."""
-    
+
     enabled: bool = Field(default=True, description="Enable session persistence")
     db_path: str | None = Field(default=None, description="Custom database path (None for default)")
     ttl_minutes: int = Field(default=30, ge=1, le=1440, description="Session timeout in minutes")
     max_history: int = Field(default=10, ge=1, le=100, description="Max conversation turns to persist")
     cleanup_interval: int = Field(default=60, ge=10, le=3600, description="Seconds between cleanup runs")
+
+    @model_validator(mode="after")
+    def validate_cleanup_vs_ttl(self) -> "PersistenceConfig":
+        ttl_seconds = self.ttl_minutes * 60
+        if self.cleanup_interval >= ttl_seconds:
+            raise ValueError(
+                f"cleanup_interval ({self.cleanup_interval}s) must be less than "
+                f"ttl_minutes ({self.ttl_minutes} min = {ttl_seconds}s); "
+                "sessions would expire before cleanup runs"
+            )
+        return self
 
 
 class WakeAcknowledgementConfig(BaseModel):
@@ -210,6 +225,14 @@ class InteractiveConfig(BaseModel):
     )
 
 
+class WebSocketServerConfig(BaseModel):
+    """WebSocket server configuration."""
+
+    host: str = Field(default="0.0.0.0", description="WebSocket server bind address")
+    port: int = Field(default=18790, ge=1024, le=65535, description="WebSocket server port")
+    max_connections: int = Field(default=10, ge=1, le=100, description="Maximum concurrent connections")
+
+
 class BridgeConfig(BaseModel):
     """Bridge behavior configuration."""
 
@@ -217,6 +240,12 @@ class BridgeConfig(BaseModel):
     max_session_duration: float = Field(default=300.0, ge=60.0, le=3600.0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
     hot_reload: bool = Field(default=True, description="Enable config file watching")
+
+    # WebSocket server
+    websocket_server: WebSocketServerConfig = Field(
+        default_factory=WebSocketServerConfig,
+        description="WebSocket server settings"
+    )
 
     # Wake word acknowledgement configuration
     acknowledgement: WakeAcknowledgementConfig = Field(
@@ -295,27 +324,14 @@ class AppConfig(BaseSettings):
         
         return self
     
-    def _discover_openclaw_token(self) -> str | None:
-        """Discover OpenClaw auth token from multiple locations.
-        
-        Searches in order:
-        1. OPENCLAW_GATEWAY_TOKEN environment variable
-        2. OPENCLAW_TOKEN environment variable (alternate)
-        3. Voice Bridge config (~/.voice-bridge/config.yaml)
-        4. OpenClaw config (~/.openclaw/openclaw.json)
-        5. Gateway token file (~/.openclaw/gateway_token)
-        6. Hidden token file (~/.openclaw/.token)
-        7. OpenClaw YAML config (~/.openclaw/config.yaml)
-        8. Workspace config (~/.openclaw/workspace/openclaw.yaml)
-        
-        Each token is validated by making a test request to OpenClaw.
-        Returns the first valid token found.
+    def get_token_sources(self) -> list[tuple[str, callable]]:
+        """Return the ordered list of (name, getter) token sources.
+
+        Callers that need to iterate sources manually (e.g. the installer's
+        interactive wizard) should use this instead of duplicating the list.
+        The order matches _discover_openclaw_token() exactly.
         """
-        import json
-        import requests
-        
-        # Token source locations (name, getter function)
-        token_sources = [
+        return [
             ("OPENCLAW_GATEWAY_TOKEN env", lambda: os.environ.get("OPENCLAW_GATEWAY_TOKEN")),
             ("OPENCLAW_TOKEN env", lambda: os.environ.get("OPENCLAW_TOKEN")),
             ("Voice Bridge config", lambda: self._get_token_from_yaml(Path.home() / ".voice-bridge" / "config.yaml")),
@@ -325,10 +341,30 @@ class AppConfig(BaseSettings):
             ("OpenClaw YAML config", lambda: self._get_token_from_yaml(Path.home() / ".openclaw" / "config.yaml")),
             ("Workspace config", lambda: self._get_token_from_yaml(Path.home() / ".openclaw" / "workspace" / "openclaw.yaml")),
         ]
-        
+
+    def _discover_openclaw_token(self) -> str | None:
+        """Discover OpenClaw auth token from multiple locations.
+
+        Searches in order:
+        1. OPENCLAW_GATEWAY_TOKEN environment variable
+        2. OPENCLAW_TOKEN environment variable (alternate)
+        3. Voice Bridge config (~/.voice-bridge/config.yaml)
+        4. OpenClaw config (~/.openclaw/openclaw.json)
+        5. Gateway token file (~/.openclaw/gateway_token)
+        6. Hidden token file (~/.openclaw/.token)
+        7. OpenClaw YAML config (~/.openclaw/config.yaml)
+        8. Workspace config (~/.openclaw/workspace/openclaw.yaml)
+
+        Each token is validated by making a test request to OpenClaw.
+        Returns the first valid token found.
+        """
+        import requests
+
+        token_sources = self.get_token_sources()
+
         # Build OpenClaw URL for validation
         openclaw_url = f"http://{self.openclaw.host}:{self.openclaw.port}"
-        
+
         for source_name, getter in token_sources:
             try:
                 token = getter()
@@ -385,7 +421,11 @@ class AppConfig(BaseSettings):
                     config.get("gateway", {}).get("auth", {}).get("token") or
                     config.get("auth_token")
                 )
-        except Exception:
+        except yaml.YAMLError as e:
+            logger.warning("token_yaml_parse_error", path=str(path), error=str(e))
+            return None
+        except OSError as e:
+            logger.warning("token_yaml_read_error", path=str(path), error=str(e))
             return None
     
     def _get_token_from_file(self, path: Path) -> str | None:
@@ -396,7 +436,8 @@ class AppConfig(BaseSettings):
         try:
             with open(path) as f:
                 return f.read().strip()
-        except Exception:
+        except OSError as e:
+            logger.warning("token_file_read_error", path=str(path), error=str(e))
             return None
     
     def _validate_token(self, openclaw_url: str, token: str) -> bool:
@@ -447,12 +488,18 @@ class AppConfig(BaseSettings):
             ValidationError: If config is invalid (strict mode)
         """
         if config_path is None:
-            # Search candidate paths in order; fall back to default
-            config_path = DEFAULT_CONFIG_FILE
-            for candidate in CONFIG_SEARCH_PATHS:
-                if candidate.exists():
-                    config_path = candidate
-                    break
+            # $VOICE_BRIDGE_CONFIG overrides all search paths
+            env_override = os.environ.get("VOICE_BRIDGE_CONFIG")
+            if env_override:
+                config_path = Path(env_override)
+                logger.info("Config path from VOICE_BRIDGE_CONFIG", config_file=str(config_path))
+            else:
+                # Search candidate paths in order; fall back to default
+                config_path = DEFAULT_CONFIG_FILE
+                for candidate in CONFIG_SEARCH_PATHS:
+                    if candidate.exists():
+                        config_path = candidate
+                        break
         else:
             config_path = Path(config_path)
 
