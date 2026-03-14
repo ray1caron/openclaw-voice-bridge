@@ -27,6 +27,9 @@ if pgrep -f "bridge.main" > /dev/null 2>&1; then
     sleep 2
 fi
 
+# Resolve XDG_CONFIG_HOME (XDG Base Directory spec)
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+
 # Check for virtual environments
 VENV_PATHS=(
     "$HOME/.voice-bridge/venv"
@@ -40,10 +43,11 @@ for venv_path in "${VENV_PATHS[@]}"; do
     fi
 done
 
-# Check for config files
+# Check for config files (same search order as bridge.config.CONFIG_SEARCH_PATHS)
 CONFIG_PATHS=(
     "$HOME/.voice-bridge/config.yaml"
-    "$HOME/.config/voice-bridge-v2/config.yaml"
+    "$XDG_CONFIG_HOME/voice-bridge/config.yaml"
+    "$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml"
 )
 
 for config_path in "${CONFIG_PATHS[@]}"; do
@@ -53,7 +57,7 @@ for config_path in "${CONFIG_PATHS[@]}"; do
 done
 
 # Ask about cleanup if previous installation found
-if [ -d "$HOME/.voice-bridge" ] || [ -d "$HOME/.config/voice-bridge-v2" ]; then
+if [ -d "$HOME/.voice-bridge" ] || [ -d "$XDG_CONFIG_HOME/voice-bridge" ] || [ -d "$XDG_CONFIG_HOME/voice-bridge-v2" ]; then
     echo ""
     echo "Previous installation detected."
     read -p "Remove previous installation? (y/N) " -n 1 -r
@@ -61,7 +65,8 @@ if [ -d "$HOME/.voice-bridge" ] || [ -d "$HOME/.config/voice-bridge-v2" ]; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Removing previous installation..."
         rm -rf "$HOME/.voice-bridge" 2>/dev/null || true
-        rm -rf "$HOME/.config/voice-bridge-v2" 2>/dev/null || true
+        rm -rf "$XDG_CONFIG_HOME/voice-bridge" 2>/dev/null || true
+        rm -rf "$XDG_CONFIG_HOME/voice-bridge-v2" 2>/dev/null || true
         rm -rf "$HOME/.local/share/voice-bridge" 2>/dev/null || true
         rm -rf "$HOME/.local/state/voice-bridge" 2>/dev/null || true
         rm -rf "$HOME/.cache/voice-bridge" 2>/dev/null || true

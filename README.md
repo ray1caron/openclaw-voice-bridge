@@ -52,9 +52,10 @@ Audio Pipeline (WebRTC VAD)
 # Install dependencies
 pip install -e .
 
-# Copy and edit config
-cp config.yaml ~/.voice-bridge/config.yaml
-$EDITOR ~/.voice-bridge/config.yaml
+# Copy and edit config (XDG preferred location)
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/voice-bridge"
+cp config.yaml "${XDG_CONFIG_HOME:-$HOME/.config}/voice-bridge/config.yaml"
+$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/voice-bridge/config.yaml"
 
 # Run
 PYTHONPATH=src python3 -m bridge.main
@@ -68,7 +69,13 @@ PYTHONPATH=src python3 -m installer
 
 ## Configuration
 
-`~/.voice-bridge/config.yaml` — copy from `config.yaml` in this repo.
+Config is loaded from the first file found in this order:
+
+1. `~/.voice-bridge/config.yaml` — legacy default
+2. `$XDG_CONFIG_HOME/voice-bridge/config.yaml` — XDG preferred (`~/.config/voice-bridge/config.yaml` when `XDG_CONFIG_HOME` is unset)
+3. `$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml` — legacy XDG name
+
+Copy the template to get started:
 
 Key settings:
 

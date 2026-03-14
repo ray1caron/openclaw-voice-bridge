@@ -56,7 +56,7 @@ The installer guides you through setup in 8 steps:
 - **Optional:** Wake word acknowledgement test
 
 #### Step 5: Configuration
-- Loads config from `~/.voice-bridge/config.yaml`
+- Searches for config in order: `~/.voice-bridge/config.yaml`, `$XDG_CONFIG_HOME/voice-bridge/config.yaml`, `$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml`
 - Shows configuration summary:
   - Wake word
   - STT model
@@ -164,9 +164,18 @@ PYTHONPATH=src python3 src/bug_tracker_ui.py --watch
 
 ### Config Location
 
+Config is loaded from the **first file found** in this order:
+
+| Priority | Path | Notes |
+|----------|------|-------|
+| 1 | `~/.voice-bridge/config.yaml` | Legacy default — existing installs work unchanged |
+| 2 | `$XDG_CONFIG_HOME/voice-bridge/config.yaml` | XDG preferred (`~/.config/voice-bridge/` when unset) |
+| 3 | `$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml` | Legacy XDG name |
+
+Other files always use `~/.voice-bridge/`:
+
 | File | Path | Description |
 |------|------|-------------|
-| Main config | `~/.voice-bridge/config.yaml` | All settings |
 | Bug database | `~/.voice-bridge/bugs.db` | Bug tracking data |
 | Data directory | `~/.voice-bridge/data/` | Session data |
 | Voices | `~/.voice-bridge/voices/` | Piper TTS voices |
@@ -204,7 +213,8 @@ openclaw:
 | Variable | Description |
 |----------|-------------|
 | `OPENCLAW_GATEWAY_TOKEN` | OpenClaw authentication token |
-| `VOICE_BRIDGE_CONFIG` | Custom config file path |
+| `VOICE_BRIDGE_CONFIG` | Custom config file path (overrides search order) |
+| `XDG_CONFIG_HOME` | Base directory for user config files (default: `~/.config`) |
 
 ---
 
