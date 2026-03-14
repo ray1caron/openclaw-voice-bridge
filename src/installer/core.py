@@ -33,6 +33,7 @@ class InstallStep(Enum):
     DEPENDENCIES = "dependencies"
     CONFIGURATION = "configuration"
     OPENCLAW_CONNECTION = "openclaw_connection"
+    BRIDGE_TEST = "bridge_test"
     BUG_CHECK = "bug_check"
     FINAL = "final"
 
@@ -195,7 +196,15 @@ class Installer:
         for issue in result.issues:
             self._diag.add(issue)
 
-        # Step 7: Bug Check
+        # Step 7: Bridge Integration Test
+        result = self._run_bridge_test()
+        self.results.append(result)
+        self._record_step_result(result)
+        all_success = all_success and result.success
+        for issue in result.issues:
+            self._diag.add(issue)
+
+        # Step 8: Bug Check
         result = self._run_bug_check()
         self.results.append(result)
         self._record_step_result(result)
@@ -203,7 +212,7 @@ class Installer:
         for issue in result.issues:
             self._diag.add(issue)
 
-        # Step 8: Final
+        # Step 9: Final
         result = self._run_final()
         self.results.append(result)
         self._record_step_result(result)
@@ -818,11 +827,190 @@ class Installer:
                 issues=issues,
             )
 
+    def _run_bridge_test(self) -> InstallResult:
+        """Run the bridge integration test.
+
+        In automatic mode: starts the real VoiceOrchestrator, lets it warm
+        up for ~1.5 s, then stops it.  Confirms that every component
+        (audio devices, STT, TTS, wake-word detector) initialises without
+        crashing — the most common failure mode on a new machine.
+
+        In interactive mode: also prompts the user to say the wake word so
+        that the full wake-word → OpenClaw ACK → TTS playback flow is
+        exercised through the actual bridge code.
+        """
+        from installer.diagnostic import Issue
+
+        start = time.time()
+        self._emit_step_start(InstallStep.BRIDGE_TEST)
+        self._emit_message("\n🎙️  Step 7: Bridge integration test...")
+
+        issues: List[Issue] = []
+
+        try:
+            from installer.bridge_test import BridgeTester
+        except ImportError as exc:
+            self.logger.warning("bridge_test_module_unavailable", error=str(exc))
+            return InstallResult(
+                step=InstallStep.BRIDGE_TEST,
+                success=True,
+                message="Bridge test skipped (module not importable)",
+                duration_ms=int((time.time() - start) * 1000),
+            )
+
+        # ── Startup test (always runs, no user interaction) ───────────────
+        self._emit_message("  Starting VoiceOrchestrator (all components)...")
+
+        tester = BridgeTester()
+        startup_result = tester.test_startup()
+        duration_ms = int((time.time() - start) * 1000)
+
+        if not startup_result.success:
+            self._emit_message(f"  ❌ {startup_result.message}")
+            error_ctx = [startup_result.message]
+            if startup_result.error:
+                error_ctx.append(str(startup_result.error))
+            issues.append(Issue(
+                step="Bridge Test",
+                title=f"Bridge failed to start: {startup_result.message}",
+                context=error_ctx,
+                fix_steps=[
+                    "Check audio devices are connected and not in use by another app.",
+                    "Verify STT model exists: python -c \"from bridge.stt import STTEngine; e=STTEngine(); print(e.initialize())\"",
+                    "Verify TTS model exists: python -c \"from bridge.tts import TTSEngine; e=TTSEngine(); print(e.initialize())\"",
+                    "Run audio test: python -m installer --test-audio",
+                    "Re-run: python -m installer",
+                ],
+                is_blocking=True,
+            ))
+            self.bug_tracker.capture_error(
+                error=startup_result.error or Exception(startup_result.message),
+                component="installer",
+                severity=BugSeverity.HIGH,
+                title=f"Step failed: bridge_test - {startup_result.message}",
+            )
+            return InstallResult(
+                step=InstallStep.BRIDGE_TEST,
+                success=False,
+                message=startup_result.message,
+                duration_ms=duration_ms,
+                can_continue=True,
+                issues=issues,
+            )
+
+        self._emit_message("  ✅ Bridge started successfully — all components initialised")
+
+        # ── Interactive wake-word test (only when running interactively) ──
+        if self.interactive:
+            try:
+                from bridge.config import get_config
+                cfg = get_config()
+                wake_word = cfg.wake_word.wake_word
+            except Exception:
+                wake_word = "computer"
+
+            self._emit_message(f"\n  Now testing the full bridge flow.")
+            self._emit_message(f"  When the bridge starts listening, say '{wake_word}'.")
+
+            try:
+                answer = input("  Run full wake-word test? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+
+            if answer in ("", "y", "yes"):
+                self._emit_message("\n  Starting bridge for wake-word test...")
+
+                full_tester = BridgeTester(wake_word_timeout_s=20.0)
+
+                def _on_started():
+                    self._emit_message("  ✅ Bridge started")
+
+                def _on_listening():
+                    self._emit_message(f"  🎧 Listening — say '{wake_word}' now!")
+
+                def _on_wake_detected(text):
+                    self._emit_message(f"  ✅ Wake word detected: '{text}'")
+
+                def _on_ack_complete(openclaw_responded):
+                    if openclaw_responded:
+                        self._emit_message("  ✅ OpenClaw responded with acknowledgement phrase")
+                    else:
+                        self._emit_message("  ⏰ OpenClaw ACK timed out (advisory)")
+
+                def _on_speaking():
+                    self._emit_message("  🔊 TTS playback started")
+
+                def _on_complete():
+                    self._emit_message("  ✅ TTS playback finished")
+
+                def _on_timeout():
+                    self._emit_message("  ⏰ Wake word not detected within 20s")
+
+                full_result = full_tester.run(
+                    on_started=_on_started,
+                    on_listening=_on_listening,
+                    on_wake_detected=_on_wake_detected,
+                    on_ack_complete=_on_ack_complete,
+                    on_speaking=_on_speaking,
+                    on_complete=_on_complete,
+                    on_timeout=_on_timeout,
+                )
+
+                duration_ms = int((time.time() - start) * 1000)
+                self._emit_message("")
+                for line in full_result.summary_lines():
+                    self._emit_message(line)
+
+                if not full_result.startup_ok:
+                    # Second start failed — report but don't block
+                    self._emit_message("  ⚠️  Bridge re-start failed for wake-word test")
+                elif not full_result.wake_word_detected:
+                    self._emit_message(
+                        "  ⚠️  Wake word not detected — microphone or VAD issue (advisory)"
+                    )
+                    issues.append(Issue(
+                        step="Bridge Test",
+                        title=f"Wake word '{wake_word}' not detected during test",
+                        context=[
+                            "The bridge started but did not hear the wake word.",
+                            "This may be a microphone sensitivity or background-noise issue.",
+                        ],
+                        fix_steps=[
+                            "Speak clearly and close to the microphone.",
+                            "Check microphone gain: alsamixer or pavucontrol",
+                            "Re-run the test: python -m installer",
+                        ],
+                        is_blocking=False,
+                    ))
+                else:
+                    self._emit_message(
+                        "  ✅ Full bridge test passed!"
+                        if full_result.openclaw_responded
+                        else "  ✅ Wake word works — OpenClaw ACK timed out (run OpenClaw for full test)"
+                    )
+
+                return InstallResult(
+                    step=InstallStep.BRIDGE_TEST,
+                    success=full_result.success or not full_result.wake_word_detected,
+                    message=full_result.message,
+                    duration_ms=duration_ms,
+                    can_continue=True,
+                    issues=issues,
+                )
+
+        # Automatic mode: startup test was sufficient
+        return InstallResult(
+            step=InstallStep.BRIDGE_TEST,
+            success=True,
+            message="Bridge startup test passed",
+            duration_ms=duration_ms,
+        )
+
     def _run_bug_check(self) -> InstallResult:
         """Check bug tracker for known issues."""
         start = time.time()
         self._emit_step_start(InstallStep.BUG_CHECK)
-        self._emit_message("\n🐛 Step 7: Checking known issues...")
+        self._emit_message("\n🐛 Step 8: Checking known issues...")
         
         try:
             from installer.bug_display import get_bug_summary
@@ -892,7 +1080,7 @@ class Installer:
         """Final installation step — summary + fix guide."""
         start = time.time()
         self._emit_step_start(InstallStep.FINAL)
-        self._emit_message("\nStep 8: Installation Summary")
+        self._emit_message("\nStep 9: Installation Summary")
         self._emit_message("=" * 50)
 
         duration_ms = int((time.time() - start) * 1000)

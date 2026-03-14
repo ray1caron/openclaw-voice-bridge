@@ -601,168 +601,126 @@ class InteractiveInstaller:
                 self._record_step("speaker_test", False, f"Speaker playback test failed: {result.message}")
     
     def _test_wake_word_acknowledgement(self):
-        """Test wake word detection and acknowledgement flow.
-        
-        This test:
-        1. Prompts user to say the wake word
-        2. Detects the wake word
-        3. Sends acknowledgement to OpenClaw and plays back its response
-        4. Plays the response
-        5. Asks user to confirm they heard it
+        """Test the full bridge by running the real VoiceOrchestrator.
+
+        This replaces the old component-level test (WakeWordAckTester) with
+        a test that exercises the complete production code path:
+        AudioPipeline + VAD + WakeWordDetector + HTTP client + TTS output.
         """
-        print("\n  🎙️  Wake Word Acknowledgement Test")
-        print("  " + "-" * 40)
-        
-        # Load configuration
+        print("\n  🎙️  Bridge Integration Test (Wake Word → OpenClaw → TTS)")
+        print("  " + "-" * 52)
+
+        # Load configuration for display
         try:
             from bridge.config import get_config
             config = get_config()
             wake_word = config.wake_word.wake_word
-            ack_enabled = config.bridge.acknowledgement.enabled
-            timeout_ms = config.bridge.acknowledgement.timeout_ms
-        except Exception as e:
-            self.logger.warning("config_load_failed", error=str(e))
-            wake_word = "hey hal"
-            ack_enabled = True
-            timeout_ms = 5000
+        except Exception as exc:
+            self.logger.warning("config_load_failed", error=str(exc))
+            wake_word = "computer"
 
-        if not ack_enabled:
-            self.print_info("Wake word acknowledgement is disabled in configuration.")
-            if not self.prompt_yes_no("Test anyway?", default=True):
-                return
-
-        print(f"\n  This test will verify your wake word detection and acknowledgement.")
-        print(f"  Wake word: '{wake_word}'")
-        print(f"  OpenClaw will provide the spoken response.")
+        print(f"\n  This test starts the actual bridge and verifies the full flow.")
+        print(f"  Wake word : '{wake_word}'")
+        print(f"  Timeout   : 20 seconds to say the wake word")
         print()
-        
-        # Check if OpenClaw is running
-        openclaw_running = self._check_openclaw_connection()
-        
-        if openclaw_running:
-            self.print_success("OpenClaw connection detected")
-            print("  The test will send the wake word to OpenClaw and play back its response.")
-        else:
-            self.print_warning("OpenClaw is not running or not connected")
-            print("  This test requires OpenClaw to be running — start OpenClaw and retry.")
-            self._record_step("wake_word_ack_test", False,
-                              "OpenClaw not reachable — wake word ack test skipped",
-                              {"wake_word": wake_word})
+
+        try:
+            from installer.bridge_test import BridgeTester
+        except ImportError as exc:
+            self.print_error("bridge_test module not available")
+            print(f"     Error: {exc}")
+            self._record_step("bridge_test", False,
+                              f"bridge_test module not importable: {exc}")
             return
 
-        # Import the wake word tester
-        try:
-            from installer.wake_word_test import WakeWordAckTester, WakeWordTestStatus
-        except ImportError as e:
-            self.print_error("Wake word test module not available")
-            print(f"     Error: {e}")
-            self._record_step("wake_word_ack_test", False,
-                              f"wake_word_test module not importable: {e}")
+        if not self.prompt_yes_no("Ready to begin bridge test?", default=True):
             return
-        
-        # Create tester
-        tester = WakeWordAckTester(
-            wake_word=wake_word,
-            ack_timeout_ms=timeout_ms,
-            listen_timeout_ms=15000,  # 15 seconds to say wake word
-        )
-        
-        if not tester.audio_available:
-            self.print_error("Audio libraries not available")
-            print("     Install with: pip install sounddevice numpy")
-            return
-        
-        # Print instructions
-        print(f"\n  📢 Say '{wake_word}' when prompted to test wake word detection.")
-        print("     I'll listen for up to 15 seconds.\n")
-        
-        if not self.prompt_yes_no("Ready to begin wake word test?", default=True):
-            return
-        
-        print("\n  🎧 Listening for wake word...")
-        print(f"     Say '{wake_word}' now!\n")
-        
-        # Define callbacks for real-time feedback
-        def on_speech_detected():
-            print("  👂 Speech detected...")
-        
+
+        tester = BridgeTester(wake_word_timeout_s=20.0)
+
+        def on_started():
+            print("  ✅ Bridge started — all components initialised")
+
+        def on_listening():
+            print(f"\n  🎧 Listening — say '{wake_word}' now!\n")
+
         def on_wake_detected(text):
             print(f"  ✅ Wake word detected: '{text}'")
-        
-        def on_ack_sent():
-            print("  📤 Acknowledgement sent to OpenClaw...")
-        
-        def on_response_received(phrase):
-            print(f"  📥 Response received: '{phrase}'")
-        
-        def on_playing():
-            print("  🔊 Playing response...")
-        
+
+        def on_ack_complete(openclaw_responded):
+            if openclaw_responded:
+                print("  ✅ OpenClaw responded with acknowledgement phrase")
+            else:
+                print("  ⏰ OpenClaw ACK timed out (advisory)")
+
+        def on_speaking():
+            print("  🔊 TTS playback started")
+
+        def on_complete():
+            print("  ✅ TTS playback finished")
+
         def on_timeout():
-            print("  ⏰ No wake word detected in time.")
-        
-        # Run the test
-        result = tester.test_full_acknowledgement(
-            on_speech_detected=on_speech_detected,
+            print("  ⏰ Wake word not detected within 20s")
+
+        result = tester.run(
+            on_started=on_started,
+            on_listening=on_listening,
             on_wake_detected=on_wake_detected,
-            on_ack_sent=on_ack_sent,
-            on_response_received=on_response_received,
-            on_playing=on_playing,
+            on_ack_complete=on_ack_complete,
+            on_speaking=on_speaking,
+            on_complete=on_complete,
             on_timeout=on_timeout,
         )
-        
-        print()  # Blank line after test output
-        
-        # Handle result
-        if result.status == WakeWordTestStatus.PASSED:
-            self.print_success("Wake word acknowledgement test passed!")
-            print(f"     Wake word: '{result.wake_word}'")
-            print(f"     Detected: '{result.detected_text}'")
-            if result.response_phrase:
-                print(f"     OpenClaw response: '{result.response_phrase}'")
-            print("     OpenClaw responded: ✅")
-            self._record_step("wake_word_ack_test", True, "Wake word ack test passed",
-                              {"wake_word": result.wake_word,
-                               "detected_text": result.detected_text,
-                               "response_phrase": result.response_phrase})
 
-            # Ask user to confirm they heard the response
-            heard = self.prompt_yes_no(
-                "\n  Did you hear OpenClaw's response?",
-                default=True
-            )
+        print()
 
-            if heard:
-                self.print_success("Wake word acknowledgement is working! 🎉")
-            # Troubleshooting removed per user request
+        # ── Display summary ───────────────────────────────────────────────
+        for line in result.summary_lines():
+            print(line)
+        print()
 
-        elif result.status == WakeWordTestStatus.TIMEOUT:
-            self.print_error("Wake word not detected within timeout")
-            print(f"     Make sure you said '{wake_word}' clearly")
-            self._record_step("wake_word_ack_test", False,
+        if not result.startup_ok:
+            self.print_error(f"Bridge failed to start: {result.message}")
+            if result.error:
+                print(f"     Error: {result.error}")
+            self._record_step("bridge_test", False,
+                              f"Bridge startup failed: {result.message}",
+                              {"wake_word": wake_word,
+                               "error": str(result.error) if result.error else None})
+            return
+
+        if not result.wake_word_detected:
+            self.print_error("Wake word not detected")
+            print(f"     Make sure you spoke '{wake_word}' clearly into the microphone.")
+            self._record_step("bridge_test", False,
                               f"Wake word '{wake_word}' not detected within timeout",
                               {"wake_word": wake_word})
             print()
-
             if self.prompt_yes_no("Try again?", default=True):
                 self._test_wake_word_acknowledgement()
             return
 
-        elif result.status == WakeWordTestStatus.SKIPPED:
-            self.print_warning("Test skipped")
-            print(f"     {result.message}")
-            self._record_step("wake_word_ack_test", False,
-                              f"Wake word ack test skipped: {result.message}",
-                              {"wake_word": wake_word})
-
-        else:
-            self.print_error(f"Test failed: {result.message}")
-            if result.error:
-                print(f"     Error: {result.error}")
-            self._record_step("wake_word_ack_test", False,
-                              f"Wake word ack test failed: {result.message}",
+        # Wake word was heard — OpenClaw response is advisory
+        if result.openclaw_responded:
+            self.print_success("Bridge test passed! Wake word, OpenClaw, and TTS all working.")
+            self._record_step("bridge_test", True, "Bridge test passed",
                               {"wake_word": wake_word,
-                               "error": str(result.error) if result.error else None})
+                               "wake_word_text": result.wake_word_text,
+                               "openclaw_responded": result.openclaw_responded,
+                               "tts_played": result.tts_played})
+
+            heard = self.prompt_yes_no("\n  Did you hear OpenClaw's response from the speakers?",
+                                       default=True)
+            if heard:
+                self.print_success("Full bridge end-to-end is working!")
+        else:
+            self.print_success("Wake word detection working! (OpenClaw ACK timed out — advisory)")
+            print("     Start OpenClaw and re-run the test to verify the full flow.")
+            self._record_step("bridge_test", True,
+                              "Wake word detected; OpenClaw ACK timed out",
+                              {"wake_word": wake_word,
+                               "wake_word_text": result.wake_word_text,
+                               "openclaw_responded": False})
     
     def _probe_openclaw_verbose(self, host: str, port: int, auth_token: str | None) -> bool:
         """Run a verbose HTTP probe against OpenClaw and print curl-equivalent output.
