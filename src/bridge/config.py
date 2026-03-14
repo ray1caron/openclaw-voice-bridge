@@ -30,6 +30,13 @@ DEFAULT_CONFIG_DIR = Path.home() / ".voice-bridge"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.yaml"
 DEFAULT_ENV_FILE = DEFAULT_CONFIG_DIR / ".env"
 
+# Candidate config paths searched in order when no explicit path is given
+CONFIG_SEARCH_PATHS = [
+    Path.home() / ".voice-bridge" / "config.yaml",
+    Path.home() / ".config" / "voice-bridge-v2" / "config.yaml",
+    Path.home() / ".config" / "voice-bridge" / "config.yaml",
+]
+
 # Global singleton
 _config: Optional[AppConfig] = None
 _config_lock = threading.Lock()
@@ -430,13 +437,18 @@ class AppConfig(BaseSettings):
             ValidationError: If config is invalid (strict mode)
         """
         if config_path is None:
+            # Search candidate paths in order; fall back to default
             config_path = DEFAULT_CONFIG_FILE
+            for candidate in CONFIG_SEARCH_PATHS:
+                if candidate.exists():
+                    config_path = candidate
+                    break
         else:
             config_path = Path(config_path)
-        
+
         # Ensure config directory exists
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Load from YAML if exists, otherwise use defaults
         if config_path.exists():
             logger.info("Loading configuration", config_file=str(config_path))
