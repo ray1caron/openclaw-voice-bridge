@@ -1,7 +1,7 @@
 # Quick Start: Voice Bridge v4.4.0
 
-**Version:** 4.4.0  
-**Last Updated:** 2026-03-06 10:26 PST
+**Version:** 4.4.0
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -21,72 +21,84 @@ Or use the startup script:
 
 ## Installation Steps
 
-The installer guides you through setup in 8 steps:
+The installer guides you through setup in 9 steps:
 
 | Step | Description | Interactive? |
 |------|-------------|--------------|
 | 1 | Previous installations check | Auto |
-| 2 | Environment preparation | Auto |
+| 2 | Clean up old installation (if needed) | Auto |
 | 3 | Dependencies check | Auto |
-| 4 | Audio hardware test | **Yes** - Records & plays audio |
-| 5 | Configuration | **Yes** - Shows config summary |
-| 6 | Known issues check | Auto |
-| 7 | **OpenClaw Integration Test** | **Yes** - Tests WebSocket + HTTP |
-| 8 | Installation summary | Auto |
+| 4 | Audio hardware test | **Yes** — Records & plays audio |
+| 5 | Configuration | **Yes** — Shows config summary |
+| 6 | OpenClaw connectivity check | Auto |
+| 7 | **Bridge integration test** | **Yes** — Runs real VoiceOrchestrator |
+| 8 | Known issues check | Auto |
+| 9 | Installation summary | Auto |
 
 ### What Happens in Each Step
 
 #### Step 1: Previous Installations
-- Scans for existing Voice Bridge installations
-- Offers to clean up old configs/data
+- Scans for existing Voice Bridge installations and running processes
+- Proceeds to Step 2 if anything is found; skips otherwise
 
-#### Step 2: Environment Preparation
-- Creates directories: `~/.voice-bridge/`, `~/.voice-bridge/data/`
-- Sets up Python path
+#### Step 2: Clean Up (conditional)
+- Stops any running bridge processes
+- Removes stale config/data files from previous installs
 
 #### Step 3: Dependencies
-- Verifies all Python packages installed
-- Lists missing packages with install commands
+- Verifies all required Python packages are installed
+- Lists missing packages with exact `pip install` commands
 
 #### Step 4: Audio Hardware Test
-- Records 3 seconds from microphone
-- Plays back through speakers
+- Records 3 seconds from the microphone
+- Plays the recording back through speakers
 - **Optional:** Speech-to-Text transcription test
 - **Optional:** Text-to-Speech playback test
-- **Optional:** Wake word acknowledgement test
+- **Optional:** Wake word acknowledgement test (uses real bridge — see Step 7)
 
 #### Step 5: Configuration
-- Searches for config in order: `~/.voice-bridge/config.yaml`, `$XDG_CONFIG_HOME/voice-bridge/config.yaml`, `$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml`
+- Searches for config in order:
+  1. `~/.voice-bridge/config.yaml`
+  2. `$XDG_CONFIG_HOME/voice-bridge/config.yaml`
+  3. `$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml`
 - Shows configuration summary:
-  - Wake word
+  - Wake word and detection backend
   - STT model
   - TTS voice
   - Audio device
-  - OpenClaw URL
-  - **WebSocket port** (from `bridge.websocket_server.port`, default 18790)
+  - OpenClaw URL and WebSocket port
 
-#### Step 6: Known Issues Check
-- Scans bug database for unresolved issues
-- Shows critical/high bugs
+#### Step 6: OpenClaw Connectivity Check
+- Makes an HTTP request to OpenClaw to verify it is reachable
+- Reports the host, port, and response status
+- Failure here is advisory — the bridge can still be tested without OpenClaw
+
+#### Step 7: Bridge Integration Test
+Runs the **real `VoiceOrchestrator`** — the exact same code path used in production.
+
+- **Startup test (automatic):** Opens audio devices, loads STT/TTS/wake-word models. Fails immediately if any component cannot initialise.
+- **Wake word test (interactive):** Prompts you to say the wake word. Listens using the live microphone and wake-word detector.
+- **OpenClaw ACK test:** After wake word detection, waits for OpenClaw to send a response.
+- **TTS test:** If OpenClaw responds, plays the TTS audio through the speakers.
+
+On failure the installer shows:
+- Which component failed (audio / STT / TTS / wake-word detector)
+- Full exception traceback
+- All bridge log lines emitted during the test
+- Audio pipeline stats (frames processed — 0 = microphone not working)
+- Any new bug-tracker entries written during the test
+
+Add `--debug` to see full log output even when the test passes.
+
+#### Step 8: Known Issues Check
+- Scans the bug database for unresolved issues
+- Shows critical and high-severity bugs
 - Offers to continue or abort
 
-#### Step 7: OpenClaw Integration Test 🆕
-- Checks if OpenClaw is available
-- **WebSocket Server Test:**
-  - Starts WebSocket server on configured port (default 18790)
-  - Connects test client
-  - Tests ping/pong protocol
-  - Verifies message serialization
-- **HTTP Integration Test:**
-  - Simulates wake word "computer"
-  - Sends test message to OpenClaw
-  - Displays response text
-  - Shows pass/fail status
-
-#### Step 8: Installation Summary
+#### Step 9: Installation Summary
 - Lists what was configured
 - Shows next steps
-- Provides run command
+- Provides the run command
 
 ---
 
@@ -99,7 +111,10 @@ PYTHONPATH=src python3 -m installer
 # Automatic mode (no prompts)
 PYTHONPATH=src python3 -m installer --auto
 
-# Test audio hardware
+# Full debug output during bridge test (traceback + all bridge logs)
+PYTHONPATH=src python3 -m installer --debug
+
+# Test audio hardware only
 PYTHONPATH=src python3 -m installer --test-audio
 
 # Show known bugs
@@ -111,6 +126,8 @@ PYTHONPATH=src python3 -m installer --show-config
 # Clean previous install
 PYTHONPATH=src python3 -m installer --clean
 ```
+
+See [INSTALLER.md](INSTALLER.md) for a complete reference.
 
 ---
 
@@ -346,7 +363,8 @@ voice-bridge-v4/
 │   │   ├── errorcapture.py      # Error capture
 │   │   └── ...                  # Other modules
 │   ├── installer/
-│   │   ├── core.py              # Installer logic
+│   │   ├── core.py              # Installer orchestrator (9 steps)
+│   │   ├── bridge_test.py       # Real bridge integration test
 │   │   └── interactive.py       # Interactive flow
 │   └── bug_tracker_ui.py         # Bug Tracker UI
 ├── tests/
@@ -354,10 +372,11 @@ voice-bridge-v4/
 ├── run.sh                        # Start bridge
 ├── run_bug_tracker_ui.sh          # Start Bug UI
 ├── ARCHITECTURE.md               # Architecture docs
+├── INSTALLER.md                  # Installer reference
 ├── BUG_TRACKER.md                # Bug tracking docs
 ├── BUGFIX_PLAN.md                # Fix plan
-├── BUG_TRACKER_ENHANCEMENT.md     # Enhancement plan
-└── QUICKSTART.md                  # This file
+├── BUG_TRACKER_ENHANCEMENT.md    # Enhancement plan
+└── QUICKSTART.md                 # This file
 ```
 
 ---
@@ -366,6 +385,7 @@ voice-bridge-v4/
 
 | Resource | Description |
 |----------|-------------|
+| `INSTALLER.md` | Full installer reference (steps, flags, diagnostics) |
 | `ARCHITECTURE.md` | Detailed system architecture |
 | `BUG_TRACKER.md` | Bug tracking documentation |
 | `BUGFIX_PLAN.md` | Known issues and fixes |
@@ -398,4 +418,4 @@ cat ~/.voice-bridge/config.yaml
 
 ---
 
-_Last Updated: 2026-03-05_
+_Last Updated: 2026-03-14_
