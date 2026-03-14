@@ -30,12 +30,22 @@ DEFAULT_CONFIG_DIR = Path.home() / ".voice-bridge"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.yaml"
 DEFAULT_ENV_FILE = DEFAULT_CONFIG_DIR / ".env"
 
-# Candidate config paths searched in order when no explicit path is given
-CONFIG_SEARCH_PATHS = [
-    Path.home() / ".voice-bridge" / "config.yaml",
-    Path.home() / ".config" / "voice-bridge-v2" / "config.yaml",
-    Path.home() / ".config" / "voice-bridge" / "config.yaml",
-]
+def _build_config_search_paths() -> list[Path]:
+    """Return candidate config paths in priority order.
+
+    Respects $XDG_CONFIG_HOME (XDG Base Directory spec); falls back to
+    ~/.config when the variable is unset or empty.
+    """
+    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    return [
+        Path.home() / ".voice-bridge" / "config.yaml",          # legacy default
+        xdg_config_home / "voice-bridge" / "config.yaml",       # XDG preferred
+        xdg_config_home / "voice-bridge-v2" / "config.yaml",    # legacy XDG name
+    ]
+
+# Candidate config paths searched in order when no explicit path is given.
+# Evaluated at import time so the list is stable for the process lifetime.
+CONFIG_SEARCH_PATHS: list[Path] = _build_config_search_paths()
 
 # Global singleton
 _config: Optional[AppConfig] = None

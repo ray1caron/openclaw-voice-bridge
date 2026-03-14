@@ -108,13 +108,17 @@ class ConfigReport:
 
 class ConfigSummary:
     """Generates configuration summary for installation display."""
-    
-    # Known config paths
-    DEFAULT_CONFIG_PATHS = [
-        Path.home() / ".voice-bridge" / "config.yaml",
-        Path.home() / ".config" / "voice-bridge-v2" / "config.yaml",
-        Path.home() / ".config" / "voice-bridge" / "config.yaml",
-    ]
+
+    # Single source of truth lives in bridge.config; import lazily to avoid
+    # circular imports at module load time.
+    @staticmethod
+    def _get_search_paths():
+        from bridge.config import CONFIG_SEARCH_PATHS
+        return CONFIG_SEARCH_PATHS
+
+    @property
+    def DEFAULT_CONFIG_PATHS(self):
+        return self._get_search_paths()
     
     def __init__(self, config_path: Optional[Path] = None):
         """Initialize config summary.
