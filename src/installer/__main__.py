@@ -12,6 +12,7 @@ Options:
     --skip-hardware  Skip hardware validation
     --clean          Clean previous installation before installing
     --verbose        Show detailed output
+    --debug          Show full debug output during bridge test
     --help           Show this message
 """
 
@@ -86,6 +87,12 @@ Examples:
         action="store_true",
         help="Show detailed output",
     )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show full debug output during bridge test (traceback, bridge logs, component status)",
+    )
     
     parser.add_argument(
         "--workspace",
@@ -120,7 +127,7 @@ Examples:
     if args.interactive:
         return run_interactive_mode(args.workspace)
     else:
-        return run_automatic_mode(args.workspace, args.verbose, args.skip_hardware)
+        return run_automatic_mode(args.workspace, args.verbose, args.skip_hardware, args.debug)
 
 
 def show_config():
@@ -263,14 +270,15 @@ def run_interactive_mode(workspace: Path | None):
     return 0 if run_interactive(workspace) else 1
 
 
-def run_automatic_mode(workspace: Path | None, verbose: bool, skip_hardware: bool):
+def run_automatic_mode(workspace: Path | None, verbose: bool, skip_hardware: bool, debug: bool = False):
     """Run automatic installation."""
     from installer.core import Installer
-    
+
     installer = Installer(
         workspace=workspace,
         interactive=False,
         verbose=verbose,
+        debug=debug,
         stop_on_error=False,
     )
     

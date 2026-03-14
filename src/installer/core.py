@@ -64,6 +64,7 @@ class Installer:
         workspace: Optional[Path] = None,
         interactive: bool = True,
         verbose: bool = False,
+        debug: bool = False,
         stop_on_error: bool = False,
     ):
         """Initialize the installer.
@@ -72,11 +73,13 @@ class Installer:
             workspace: Optional workspace path
             interactive: Run interactively with user prompts
             verbose: Show detailed output
+            debug: Enable full debug output (traceback + bridge logs) even on success
             stop_on_error: Stop installation on any error
         """
         self.workspace = workspace or Path.cwd()
         self.interactive = interactive
-        self.verbose = verbose
+        self.verbose = verbose or debug  # debug implies verbose
+        self.debug = debug
         self.stop_on_error = stop_on_error
         self.logger = structlog.get_logger()
         self.bug_tracker = BugTracker.get_instance()
@@ -838,6 +841,10 @@ class Installer:
         In interactive mode: also prompts the user to say the wake word so
         that the full wake-word → OpenClaw ACK → TTS playback flow is
         exercised through the actual bridge code.
+
+        Debug output (--verbose / --debug): full traceback, all bridge log
+        lines, per-component status, audio pipeline stats, and any new
+        bug-tracker entries written during the test.
         """
         from installer.diagnostic import Issue
 
@@ -861,15 +868,47 @@ class Installer:
         # ── Startup test (always runs, no user interaction) ───────────────
         self._emit_message("  Starting VoiceOrchestrator (all components)...")
 
-        tester = BridgeTester()
+        tester = BridgeTester(enable_logging=True)
         startup_result = tester.test_startup()
         duration_ms = int((time.time() - start) * 1000)
 
         if not startup_result.success:
             self._emit_message(f"  ❌ {startup_result.message}")
+
+            # Component-level detail
+            if startup_result.component_status:
+                self._emit_message("  Component status:")
+                for name, status in startup_result.component_status.items():
+                    icon = "✅" if status in ("listening", "loaded", "running") else "❌"
+                    self._emit_message(f"     {icon} {name}: {status}")
+
+            # Always show traceback when startup fails — it's the key diagnostic
+            if startup_result.traceback_str:
+                self._emit_message("\n  --- Exception traceback ---")
+                for line in startup_result.traceback_str.splitlines():
+                    self._emit_message(f"  {line}")
+
+            # Show bridge log lines (always on failure — this is what we need to fix)
+            if startup_result.log_lines:
+                self._emit_message(f"\n  --- Bridge log ({len(startup_result.log_lines)} lines) ---")
+                for line in startup_result.log_lines[-40:]:
+                    self._emit_message(f"  {line}")
+
+            # Extra log lines in verbose mode
+            if self.verbose and len(startup_result.log_lines) > 40:
+                self._emit_message(f"  (use python -m installer --verbose to see all {len(startup_result.log_lines)} lines)")
+
+            if startup_result.new_bug_ids:
+                self._emit_message(f"\n  New bug-tracker entries: {startup_result.new_bug_ids}")
+                self._emit_message("  Run: python -m installer --show-bugs")
+
             error_ctx = [startup_result.message]
             if startup_result.error:
                 error_ctx.append(str(startup_result.error))
+            if startup_result.component_status:
+                for name, status in startup_result.component_status.items():
+                    error_ctx.append(f"{name}: {status}")
+
             issues.append(Issue(
                 step="Bridge Test",
                 title=f"Bridge failed to start: {startup_result.message}",
@@ -879,7 +918,7 @@ class Installer:
                     "Verify STT model exists: python -c \"from bridge.stt import STTEngine; e=STTEngine(); print(e.initialize())\"",
                     "Verify TTS model exists: python -c \"from bridge.tts import TTSEngine; e=TTSEngine(); print(e.initialize())\"",
                     "Run audio test: python -m installer --test-audio",
-                    "Re-run: python -m installer",
+                    "Re-run with debug output: python -m installer --debug",
                 ],
                 is_blocking=True,
             ))
@@ -893,10 +932,17 @@ class Installer:
                 step=InstallStep.BRIDGE_TEST,
                 success=False,
                 message=startup_result.message,
+                details=startup_result.traceback_str,
                 duration_ms=duration_ms,
                 can_continue=True,
                 issues=issues,
             )
+
+        # Show component status on success too (verbose mode)
+        if self.verbose and startup_result.component_status:
+            self._emit_message("  Component status:")
+            for name, status in startup_result.component_status.items():
+                self._emit_message(f"     • {name}: {status}")
 
         self._emit_message("  ✅ Bridge started successfully — all components initialised")
 
@@ -920,7 +966,7 @@ class Installer:
             if answer in ("", "y", "yes"):
                 self._emit_message("\n  Starting bridge for wake-word test...")
 
-                full_tester = BridgeTester(wake_word_timeout_s=20.0)
+                full_tester = BridgeTester(wake_word_timeout_s=20.0, enable_logging=True)
 
                 def _on_started():
                     self._emit_message("  ✅ Bridge started")
@@ -961,24 +1007,38 @@ class Installer:
                 for line in full_result.summary_lines():
                     self._emit_message(line)
 
+                # Always show debug info on any failure
+                if not full_result.success or self.verbose:
+                    for line in full_result.debug_lines():
+                        self._emit_message(line)
+
                 if not full_result.startup_ok:
-                    # Second start failed — report but don't block
                     self._emit_message("  ⚠️  Bridge re-start failed for wake-word test")
                 elif not full_result.wake_word_detected:
                     self._emit_message(
                         "  ⚠️  Wake word not detected — microphone or VAD issue (advisory)"
                     )
+                    # Audio stats tell us if mic was dead or just quiet
+                    if full_result.audio_stats:
+                        frames = full_result.audio_stats.get("frames_processed", 0)
+                        segs = full_result.audio_stats.get("speech_segments_detected", 0)
+                        if frames == 0:
+                            self._emit_message("  ⚠️  No audio frames processed — microphone may not be working")
+                        else:
+                            self._emit_message(f"  ℹ  Audio captured: {frames} frames, {segs} VAD segments")
                     issues.append(Issue(
                         step="Bridge Test",
                         title=f"Wake word '{wake_word}' not detected during test",
                         context=[
                             "The bridge started but did not hear the wake word.",
-                            "This may be a microphone sensitivity or background-noise issue.",
+                            f"Audio frames processed: {full_result.audio_stats.get('frames_processed', 'unknown')}",
+                            f"VAD segments detected: {full_result.audio_stats.get('speech_segments_detected', 'unknown')}",
                         ],
                         fix_steps=[
                             "Speak clearly and close to the microphone.",
                             "Check microphone gain: alsamixer or pavucontrol",
-                            "Re-run the test: python -m installer",
+                            "If 0 audio frames: audio device may have changed — re-run hardware check",
+                            "Re-run with debug output: python -m installer --debug",
                         ],
                         is_blocking=False,
                     ))
@@ -993,6 +1053,7 @@ class Installer:
                     step=InstallStep.BRIDGE_TEST,
                     success=full_result.success or not full_result.wake_word_detected,
                     message=full_result.message,
+                    details=full_result.traceback_str,
                     duration_ms=duration_ms,
                     can_continue=True,
                     issues=issues,
