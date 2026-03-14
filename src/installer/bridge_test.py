@@ -124,8 +124,9 @@ class BridgeTestResult:
             f"  Bridge startup   : {'✅ OK' if self.startup_ok else '❌ FAILED'}",
         ]
         if self.component_status:
+            _FAIL = {"error", "not loaded", "failed"}
             for name, status in self.component_status.items():
-                icon = "✅" if "ok" in status.lower() or "loaded" in status.lower() else "❌"
+                icon = "❌" if any(k in status.lower() for k in _FAIL) else "✅"
                 lines.append(f"    {icon} {name}: {status}")
         if self.startup_ok:
             ww = f"✅ '{self.wake_word_text}'" if self.wake_word_detected else "❌ not detected"
@@ -346,7 +347,7 @@ class BridgeTester:
                     on_complete()
 
         orchestrator.on_wake_word = _on_wake_word
-        orchestrator.on_state_change = _on_state_change
+        orchestrator.add_state_callback(_on_state_change)
 
         # ── Start the bridge ──────────────────────────────────────────────
 

@@ -526,32 +526,36 @@ class AudioPipeline:
         
         This runs in a separate thread and can safely perform blocking operations.
         """
-        logger.info("worker_thread_started", queue_size=self._audio_queue.maxsize if self._audio_queue else 0)
+        # Capture references at thread start; stop_capture() may null them while
+        # this thread is still alive (after a join() timeout).
+        stop_event = self._stop_event
+        audio_queue = self._audio_queue
+        logger.info("worker_thread_started", queue_size=audio_queue.maxsize if audio_queue else 0)
         frames_processed = 0
-        
+
         with self.error_capture.context(context="capture_loop"):
-            while not self._stop_event.is_set():
+            while stop_event is not None and not stop_event.is_set():
                 try:
-                    audio_data = self._audio_queue.get(timeout=0.05)
+                    audio_data = audio_queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                
+
                 try:
                     self._process_audio_frame(audio_data)
                     frames_processed += 1
-                    
+
                     # Log every 100 frames to confirm audio is flowing
                     if frames_processed % 100 == 0:
                         logger.debug("worker_frames_processed", count=frames_processed)
                 except Exception as e:
-                    if not self._stop_event.is_set():
+                    if stop_event is not None and not stop_event.is_set():
                         logger.error("worker_frame_error", error=str(e), exc_info=True)
                         # Don't re-raise - keep processing
-            
+
             # Drain remaining queue on exit
-            while not self._audio_queue.empty():
+            while audio_queue is not None and not audio_queue.empty():
                 try:
-                    audio_data = self._audio_queue.get_nowait()
+                    audio_data = audio_queue.get_nowait()
                     self._process_audio_frame(audio_data)
                 except queue.Empty:
                     break

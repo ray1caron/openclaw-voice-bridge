@@ -435,7 +435,15 @@ class VoiceOrchestrator:
             return
         
         self._stats.wake_word_detections += 1
-        
+
+        # Notify listeners immediately — before ack handling, which may block
+        # the calling thread when no event loop is running (asyncio.run fallback).
+        if hasattr(self, 'on_wake_word'):
+            try:
+                self.on_wake_word(text)
+            except Exception as e:
+                logger.error("on_wake_word_callback_error", error=str(e))
+
         # Check if wake word acknowledgement is enabled
         ack_config = self.config.bridge.acknowledgement
         if ack_config.enabled:
@@ -443,13 +451,6 @@ class VoiceOrchestrator:
         else:
             # Skip acknowledgement, enter interactive mode directly
             self._enter_interactive_mode()
-        
-        # Notify any registered listeners
-        if hasattr(self, 'on_wake_word'):
-            try:
-                self.on_wake_word(text)
-            except Exception as e:
-                logger.error("on_wake_word_callback_error", error=str(e))
     
     def _handle_wake_word_ack(self, wake_word_text: str, ack_config):
         """
