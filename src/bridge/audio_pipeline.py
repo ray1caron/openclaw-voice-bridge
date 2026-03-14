@@ -248,10 +248,13 @@ class AudioPipeline:
             max_samples=vad_frame_samples * 100,  # 100 frames of VAD audio
             sample_rate=self.audio_config.sample_rate
         )
-        self.output_buffer = AudioBuffer(
-            max_samples=self.audio_config.sample_rate * 5,  # 5 seconds of output audio
-            sample_rate=self.audio_config.sample_rate
-        )
+        # FIFO queue for audio output frames.  Each entry is a 1024-sample
+        # np.int16 array at the device native rate.  512 slots ≈ 10 s at
+        # 48 kHz — large enough for any TTS response.  Using a proper FIFO
+        # here (instead of the ring-buffer AudioBuffer) ensures each frame
+        # is played exactly once; the old non-destructive read() caused the
+        # callback to loop the same 1024-sample chunk forever.
+        self._output_queue: queue.Queue = queue.Queue(maxsize=512)
         
         # State
         self._state = PipelineState.IDLE
@@ -766,15 +769,15 @@ class AudioPipeline:
         """
         if status:
             logger.warning("audio_output_status", status=str(status))
-        
-        frame = self.output_buffer.read()
-        if frame is not None:
+
+        try:
+            frame = self._output_queue.get_nowait()
             if len(frame) >= frames:
                 outdata[:, 0] = frame[:frames]
             else:
                 outdata[:len(frame), 0] = frame
                 outdata[len(frame):, 0] = 0
-        else:
+        except queue.Empty:
             outdata.fill(0)
     
     def play_audio(self, audio_data: np.ndarray, sample_rate: int = None) -> bool:
@@ -802,8 +805,11 @@ class AudioPipeline:
         
         queued = 0
         for frame in frames:
-            if self.output_buffer.write(frame, block=False):
+            try:
+                self._output_queue.put_nowait(frame)
                 queued += 1
+            except queue.Full:
+                break  # Queue full — drop remaining frames rather than blocking
         
         if queued > 0:
             self._set_state(PipelineState.SPEAKING)
@@ -813,12 +819,20 @@ class AudioPipeline:
             return True
         return False
     
+    def _drain_output_queue(self):
+        """Discard all pending frames in the output queue."""
+        while True:
+            try:
+                self._output_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def stop_playback_immediate(self):
         """Stop playback immediately for barge-in."""
         with self._barge_in_lock:
             if self._is_speaking:
                 logger.info("barge_in_triggered")
-                self.output_buffer.clear()
+                self._drain_output_queue()
                 self._is_speaking = False
                 self._stats.barge_in_count += 1
                 self._set_state(PipelineState.LISTENING)

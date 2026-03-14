@@ -170,6 +170,14 @@ class VoiceOrchestrator:
         # their command before/during the "Yes?" acknowledgement audio).
         self._buffered_speech_segment: Optional[object] = None
 
+        # Set to True when we first enter interactive mode so that
+        # _on_stt_complete can silently drop a transcription that is just the
+        # wake word itself.  The VAD often captures the wake word utterance as
+        # a speech segment and buffers it; without this guard the bridge sends
+        # "computer" (or whatever the wake word is) to OpenClaw as the user's
+        # first message.
+        self._suppress_wake_word_echo: bool = False
+
         # Event loop reference for safe async dispatch from audio threads.
         # Populated in start() once the loop is guaranteed to be running.
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -574,6 +582,7 @@ class VoiceOrchestrator:
             cancel_phrases=interactive_cfg.cancel_phrases,
         )
         self._interactive_mode = True
+        self._suppress_wake_word_echo = True  # drop the first STT result if it is just the wake word
         self._set_state(OrchestratorState.INTERACTIVE)
         self._reset_idle_timer()
 
@@ -788,6 +797,22 @@ class VoiceOrchestrator:
             return
 
         logger.info("transcription_complete", text=text)
+
+        # Suppress the wake word echo: the VAD often captures the wake word
+        # utterance itself as a speech segment and buffers it during
+        # WAKE_WORD_ACK.  When replayed, it transcribes to the wake word and
+        # would be sent to OpenClaw as the user's first command.  Drop it.
+        if self._suppress_wake_word_echo:
+            self._suppress_wake_word_echo = False
+            wake_word = self.config.wake_word.wake_word.strip().lower()
+            if text.strip().lower() == wake_word:
+                logger.info("suppressed_wake_word_echo", text=text)
+                if self._interactive_mode:
+                    self._set_state(OrchestratorState.INTERACTIVE)
+                    self._reset_idle_timer()
+                else:
+                    self._set_state(OrchestratorState.LISTENING_FOR_WAKE_WORD)
+                return
 
         # Check for cancel phrases when in interactive mode
         if self._interactive_mode:

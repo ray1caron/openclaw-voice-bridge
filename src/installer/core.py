@@ -33,6 +33,7 @@ class InstallStep(Enum):
     DEPENDENCIES = "dependencies"
     CONFIGURATION = "configuration"
     OPENCLAW_CONNECTION = "openclaw_connection"
+    BRIDGE_TEST = "bridge_test"
     BUG_CHECK = "bug_check"
     FINAL = "final"
 
@@ -63,6 +64,7 @@ class Installer:
         workspace: Optional[Path] = None,
         interactive: bool = True,
         verbose: bool = False,
+        debug: bool = False,
         stop_on_error: bool = False,
     ):
         """Initialize the installer.
@@ -71,11 +73,13 @@ class Installer:
             workspace: Optional workspace path
             interactive: Run interactively with user prompts
             verbose: Show detailed output
+            debug: Enable full debug output (traceback + bridge logs) even on success
             stop_on_error: Stop installation on any error
         """
         self.workspace = workspace or Path.cwd()
         self.interactive = interactive
-        self.verbose = verbose
+        self.verbose = verbose or debug  # debug implies verbose
+        self.debug = debug
         self.stop_on_error = stop_on_error
         self.logger = structlog.get_logger()
         self.bug_tracker = BugTracker.get_instance()
@@ -195,7 +199,15 @@ class Installer:
         for issue in result.issues:
             self._diag.add(issue)
 
-        # Step 7: Bug Check
+        # Step 7: Bridge Integration Test
+        result = self._run_bridge_test()
+        self.results.append(result)
+        self._record_step_result(result)
+        all_success = all_success and result.success
+        for issue in result.issues:
+            self._diag.add(issue)
+
+        # Step 8: Bug Check
         result = self._run_bug_check()
         self.results.append(result)
         self._record_step_result(result)
@@ -203,7 +215,7 @@ class Installer:
         for issue in result.issues:
             self._diag.add(issue)
 
-        # Step 8: Final
+        # Step 9: Final
         result = self._run_final()
         self.results.append(result)
         self._record_step_result(result)
@@ -818,11 +830,248 @@ class Installer:
                 issues=issues,
             )
 
+    def _run_bridge_test(self) -> InstallResult:
+        """Run the bridge integration test.
+
+        In automatic mode: starts the real VoiceOrchestrator, lets it warm
+        up for ~1.5 s, then stops it.  Confirms that every component
+        (audio devices, STT, TTS, wake-word detector) initialises without
+        crashing — the most common failure mode on a new machine.
+
+        In interactive mode: also prompts the user to say the wake word so
+        that the full wake-word → OpenClaw ACK → TTS playback flow is
+        exercised through the actual bridge code.
+
+        Debug output (--verbose / --debug): full traceback, all bridge log
+        lines, per-component status, audio pipeline stats, and any new
+        bug-tracker entries written during the test.
+        """
+        from installer.diagnostic import Issue
+
+        start = time.time()
+        self._emit_step_start(InstallStep.BRIDGE_TEST)
+        self._emit_message("\n🎙️  Step 7: Bridge integration test...")
+
+        issues: List[Issue] = []
+
+        try:
+            from installer.bridge_test import BridgeTester
+        except ImportError as exc:
+            self.logger.warning("bridge_test_module_unavailable", error=str(exc))
+            return InstallResult(
+                step=InstallStep.BRIDGE_TEST,
+                success=True,
+                message="Bridge test skipped (module not importable)",
+                duration_ms=int((time.time() - start) * 1000),
+            )
+
+        # ── Startup test (always runs, no user interaction) ───────────────
+        self._emit_message("  Starting VoiceOrchestrator (all components)...")
+
+        tester = BridgeTester(enable_logging=True)
+        startup_result = tester.test_startup()
+        duration_ms = int((time.time() - start) * 1000)
+
+        if not startup_result.success:
+            self._emit_message(f"  ❌ {startup_result.message}")
+
+            # Component-level detail
+            if startup_result.component_status:
+                self._emit_message("  Component status:")
+                for name, status in startup_result.component_status.items():
+                    icon = "✅" if status in ("listening", "loaded", "running") else "❌"
+                    self._emit_message(f"     {icon} {name}: {status}")
+
+            # Always show traceback when startup fails — it's the key diagnostic
+            if startup_result.traceback_str:
+                self._emit_message("\n  --- Exception traceback ---")
+                for line in startup_result.traceback_str.splitlines():
+                    self._emit_message(f"  {line}")
+
+            # Show bridge log lines (always on failure — this is what we need to fix)
+            if startup_result.log_lines:
+                self._emit_message(f"\n  --- Bridge log ({len(startup_result.log_lines)} lines) ---")
+                for line in startup_result.log_lines[-40:]:
+                    self._emit_message(f"  {line}")
+
+            # Extra log lines in verbose mode
+            if self.verbose and len(startup_result.log_lines) > 40:
+                self._emit_message(f"  (use python -m installer --verbose to see all {len(startup_result.log_lines)} lines)")
+
+            if startup_result.new_bug_ids:
+                self._emit_message(f"\n  New bug-tracker entries: {startup_result.new_bug_ids}")
+                self._emit_message("  Run: python -m installer --show-bugs")
+
+            error_ctx = [startup_result.message]
+            if startup_result.error:
+                error_ctx.append(str(startup_result.error))
+            if startup_result.component_status:
+                for name, status in startup_result.component_status.items():
+                    error_ctx.append(f"{name}: {status}")
+
+            issues.append(Issue(
+                step="Bridge Test",
+                title=f"Bridge failed to start: {startup_result.message}",
+                context=error_ctx,
+                fix_steps=[
+                    "Check audio devices are connected and not in use by another app.",
+                    "Verify STT model exists: python -c \"from bridge.stt import STTEngine; e=STTEngine(); print(e.initialize())\"",
+                    "Verify TTS model exists: python -c \"from bridge.tts import TTSEngine; e=TTSEngine(); print(e.initialize())\"",
+                    "Run audio test: python -m installer --test-audio",
+                    "Re-run with debug output: python -m installer --debug",
+                ],
+                is_blocking=True,
+            ))
+            self.bug_tracker.capture_error(
+                error=startup_result.error or Exception(startup_result.message),
+                component="installer",
+                severity=BugSeverity.HIGH,
+                title=f"Step failed: bridge_test - {startup_result.message}",
+            )
+            return InstallResult(
+                step=InstallStep.BRIDGE_TEST,
+                success=False,
+                message=startup_result.message,
+                details=startup_result.traceback_str,
+                duration_ms=duration_ms,
+                can_continue=True,
+                issues=issues,
+            )
+
+        # Show component status on success too (verbose mode)
+        if self.verbose and startup_result.component_status:
+            self._emit_message("  Component status:")
+            for name, status in startup_result.component_status.items():
+                self._emit_message(f"     • {name}: {status}")
+
+        self._emit_message("  ✅ Bridge started successfully — all components initialised")
+
+        # ── Interactive wake-word test (only when running interactively) ──
+        if self.interactive:
+            try:
+                from bridge.config import get_config
+                cfg = get_config()
+                wake_word = cfg.wake_word.wake_word
+            except Exception:
+                wake_word = "computer"
+
+            self._emit_message(f"\n  Now testing the full bridge flow.")
+            self._emit_message(f"  When the bridge starts listening, say '{wake_word}'.")
+
+            try:
+                answer = input("  Run full wake-word test? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+
+            if answer in ("", "y", "yes"):
+                self._emit_message("\n  Starting bridge for wake-word test...")
+
+                full_tester = BridgeTester(wake_word_timeout_s=20.0, enable_logging=True)
+
+                def _on_started():
+                    self._emit_message("  ✅ Bridge started")
+
+                def _on_listening():
+                    self._emit_message(f"  🎧 Listening — say '{wake_word}' now!")
+
+                def _on_wake_detected(text):
+                    self._emit_message(f"  ✅ Wake word detected: '{text}'")
+
+                def _on_ack_complete(openclaw_responded):
+                    if openclaw_responded:
+                        self._emit_message("  ✅ OpenClaw responded with acknowledgement phrase")
+                    else:
+                        self._emit_message("  ⏰ OpenClaw ACK timed out (advisory)")
+
+                def _on_speaking():
+                    self._emit_message("  🔊 TTS playback started")
+
+                def _on_complete():
+                    self._emit_message("  ✅ TTS playback finished")
+
+                def _on_timeout():
+                    self._emit_message("  ⏰ Wake word not detected within 20s")
+
+                full_result = full_tester.run(
+                    on_started=_on_started,
+                    on_listening=_on_listening,
+                    on_wake_detected=_on_wake_detected,
+                    on_ack_complete=_on_ack_complete,
+                    on_speaking=_on_speaking,
+                    on_complete=_on_complete,
+                    on_timeout=_on_timeout,
+                )
+
+                duration_ms = int((time.time() - start) * 1000)
+                self._emit_message("")
+                for line in full_result.summary_lines():
+                    self._emit_message(line)
+
+                # Always show debug info on any failure
+                if not full_result.success or self.verbose:
+                    for line in full_result.debug_lines():
+                        self._emit_message(line)
+
+                if not full_result.startup_ok:
+                    self._emit_message("  ⚠️  Bridge re-start failed for wake-word test")
+                elif not full_result.wake_word_detected:
+                    self._emit_message(
+                        "  ⚠️  Wake word not detected — microphone or VAD issue (advisory)"
+                    )
+                    # Audio stats tell us if mic was dead or just quiet
+                    if full_result.audio_stats:
+                        frames = full_result.audio_stats.get("frames_processed", 0)
+                        segs = full_result.audio_stats.get("speech_segments_detected", 0)
+                        if frames == 0:
+                            self._emit_message("  ⚠️  No audio frames processed — microphone may not be working")
+                        else:
+                            self._emit_message(f"  ℹ  Audio captured: {frames} frames, {segs} VAD segments")
+                    issues.append(Issue(
+                        step="Bridge Test",
+                        title=f"Wake word '{wake_word}' not detected during test",
+                        context=[
+                            "The bridge started but did not hear the wake word.",
+                            f"Audio frames processed: {full_result.audio_stats.get('frames_processed', 'unknown')}",
+                            f"VAD segments detected: {full_result.audio_stats.get('speech_segments_detected', 'unknown')}",
+                        ],
+                        fix_steps=[
+                            "Speak clearly and close to the microphone.",
+                            "Check microphone gain: alsamixer or pavucontrol",
+                            "If 0 audio frames: audio device may have changed — re-run hardware check",
+                            "Re-run with debug output: python -m installer --debug",
+                        ],
+                        is_blocking=False,
+                    ))
+                else:
+                    self._emit_message(
+                        "  ✅ Full bridge test passed!"
+                        if full_result.openclaw_responded
+                        else "  ✅ Wake word works — OpenClaw ACK timed out (run OpenClaw for full test)"
+                    )
+
+                return InstallResult(
+                    step=InstallStep.BRIDGE_TEST,
+                    success=full_result.success or not full_result.wake_word_detected,
+                    message=full_result.message,
+                    details=full_result.traceback_str,
+                    duration_ms=duration_ms,
+                    can_continue=True,
+                    issues=issues,
+                )
+
+        # Automatic mode: startup test was sufficient
+        return InstallResult(
+            step=InstallStep.BRIDGE_TEST,
+            success=True,
+            message="Bridge startup test passed",
+            duration_ms=duration_ms,
+        )
+
     def _run_bug_check(self) -> InstallResult:
         """Check bug tracker for known issues."""
         start = time.time()
         self._emit_step_start(InstallStep.BUG_CHECK)
-        self._emit_message("\n🐛 Step 7: Checking known issues...")
+        self._emit_message("\n🐛 Step 8: Checking known issues...")
         
         try:
             from installer.bug_display import get_bug_summary
@@ -892,7 +1141,7 @@ class Installer:
         """Final installation step — summary + fix guide."""
         start = time.time()
         self._emit_step_start(InstallStep.FINAL)
-        self._emit_message("\nStep 8: Installation Summary")
+        self._emit_message("\nStep 9: Installation Summary")
         self._emit_message("=" * 50)
 
         duration_ms = int((time.time() - start) * 1000)

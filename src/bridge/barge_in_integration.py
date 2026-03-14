@@ -135,8 +135,8 @@ class AudioPipelineBargeIn:
         # Transition pipeline to listening
         self.pipeline._set_state(PipelineState.LISTENING)
         
-        # Clear output buffer
-        self.pipeline.output_buffer.clear()
+        # Drain the output queue
+        self.pipeline._drain_output_queue()
         
         # Notify callback
         if self.on_interruption:
