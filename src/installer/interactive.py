@@ -954,17 +954,16 @@ class InteractiveInstaller:
 
     def _save_token_to_config(self, token: str, config_path: str | None) -> None:
         """Write auth token to the voice-bridge config file."""
-        import os
+        from bridge.config import get_config, DEFAULT_CONFIG_FILE
         try:
-            from bridge.config import get_config
             cfg_obj = get_config()
             cfg_obj.openclaw.auth_token = token
             cfg_obj.save()
-            saved_path = config_path or os.path.expanduser("~/.voice-bridge/config.yaml")
+            saved_path = config_path or str(DEFAULT_CONFIG_FILE)
             print(f"  Token saved to {saved_path}")
         except Exception as exc:
             # Fallback: edit the YAML line directly
-            target = config_path or os.path.expanduser("~/.voice-bridge/config.yaml")
+            target = config_path or str(DEFAULT_CONFIG_FILE)
             try:
                 with open(target) as f:
                     lines = f.readlines()
