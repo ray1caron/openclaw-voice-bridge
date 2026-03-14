@@ -52,9 +52,10 @@ Audio Pipeline (WebRTC VAD)
 # Install dependencies
 pip install -e .
 
-# Copy and edit config
-cp config.yaml ~/.voice-bridge/config.yaml
-$EDITOR ~/.voice-bridge/config.yaml
+# Copy and edit config (XDG preferred location)
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/voice-bridge"
+cp config.yaml "${XDG_CONFIG_HOME:-$HOME/.config}/voice-bridge/config.yaml"
+$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/voice-bridge/config.yaml"
 
 # Run
 PYTHONPATH=src python3 -m bridge.main
@@ -68,7 +69,13 @@ PYTHONPATH=src python3 -m installer
 
 ## Configuration
 
-`~/.voice-bridge/config.yaml` — copy from `config.yaml` in this repo.
+Config is loaded from the first file found in this order:
+
+1. `~/.voice-bridge/config.yaml` — legacy default
+2. `$XDG_CONFIG_HOME/voice-bridge/config.yaml` — XDG preferred (`~/.config/voice-bridge/config.yaml` when `XDG_CONFIG_HOME` is unset)
+3. `$XDG_CONFIG_HOME/voice-bridge-v2/config.yaml` — legacy XDG name
+
+Copy the template to get started:
 
 Key settings:
 
@@ -77,12 +84,15 @@ openclaw:
   host: "localhost"
   port: 18789
   api_mode: "http"          # http (default) or websocket
+  auth_token: null           # env vars take priority: OPENCLAW_GATEWAY_TOKEN or OPENCLAW_TOKEN
 
 wake_word:
   wake_word: "computer"
   backend: "stt"            # stt (reliable) or openwakeword (fast)
 
 bridge:
+  websocket_server:
+    port: 18790             # port clients connect to (configurable)
   acknowledgement:
     enabled: true
     timeout_ms: 5000        # wait this long for OpenClaw's ack reply
@@ -139,7 +149,7 @@ severity.
 | `src/bridge/tts.py` | Piper text-to-speech |
 | `src/bridge/http_client.py` | OpenClaw HTTP API client |
 | `src/bridge/websocket_client.py` | OpenClaw WebSocket client (legacy) |
-| `src/bridge/websocket_server.py` | Inbound WebSocket server (port 18790) |
+| `src/bridge/websocket_server.py` | Inbound WebSocket server (port from `bridge.websocket_server.port`, default 18790) |
 | `src/bridge/config.py` | Pydantic configuration models |
 | `src/bridge/bug_tracker.py` | Error capture + diagnostic event recording |
 | `src/bridge/database.py` | Thread-safe SQLite connection manager |

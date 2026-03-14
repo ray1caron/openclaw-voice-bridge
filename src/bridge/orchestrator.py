@@ -540,8 +540,8 @@ class VoiceOrchestrator:
                 trigger="timer",
                 metadata={"timeout_ms": getattr(self.config.bridge.acknowledgement, "timeout_ms", None)},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("bug_tracker_record_failed", event="ack_timeout", error=str(e))
 
         self._enter_interactive_mode()
 

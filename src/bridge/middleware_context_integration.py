@@ -344,11 +344,16 @@ class ContextAwareMiddleware(OpenClawMiddleware):
             context_turns=len(context)
         )
         
-        # TODO: Call OpenClaw with context
-        # For now, create a mock response for integration testing
-        # In production, this would integrate with actual OpenClaw API
-        
-        # Create response (this would come from OpenClaw)
+        # TODO: Call OpenClaw with context — not yet implemented.
+        # This method currently returns a stub response and should NOT be
+        # used in production.  Wire the actual OpenClaw HTTP/WebSocket call
+        # here when the context-aware conversation feature is built out.
+        import structlog as _sl
+        _sl.get_logger().warning(
+            "context_middleware.stub_response",
+            session_uuid=self.session_uuid,
+            message="ContextAwareMiddleware.process_with_context is a stub — returning placeholder",
+        )
         response = self.create_final_message(
             f"[Processing: {user_content[:50]}...]"
         )

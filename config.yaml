@@ -1,5 +1,8 @@
 # Voice Bridge Configuration
-# Copy this file to ~/.voice-bridge/config.yaml
+# Copy to the first location that suits your setup (checked in order):
+#   ~/.voice-bridge/config.yaml          (legacy default)
+#   $XDG_CONFIG_HOME/voice-bridge/config.yaml  (XDG preferred, ~/.config/voice-bridge/ when unset)
+# Or point directly with: VOICE_BRIDGE_CONFIG=/path/to/config.yaml
 
 # OpenClaw Connection
 openclaw:
@@ -10,7 +13,7 @@ openclaw:
   timeout_ms: 30000
   api_mode: "http"          # "http" or "websocket"
   ws_path: "/api/voice"
-  auth_token: null           # Or set OPENCLAW_GATEWAY_TOKEN env var
+  auth_token: null           # Env vars take priority: OPENCLAW_GATEWAY_TOKEN or OPENCLAW_TOKEN
 
 # Audio Settings
 audio:
@@ -52,6 +55,12 @@ bridge:
   log_level: "INFO"          # Options: DEBUG, INFO, WARNING, ERROR
   hot_reload: true
 
+  # WebSocket server — clients (e.g. OpenClaw Gateway) connect here
+  websocket_server:
+    host: "0.0.0.0"
+    port: 18790
+    max_connections: 10
+
   # Wake word acknowledgement - OpenClaw responds with a spoken phrase
   acknowledgement:
     enabled: true
@@ -77,4 +86,4 @@ persistence:
   db_path: null              # null = use default path
   ttl_minutes: 30
   max_history: 10
-  cleanup_interval: 60
+  cleanup_interval: 60       # Must be < ttl_minutes * 60 (i.e. < 1800s with defaults)
